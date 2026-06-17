@@ -1,0 +1,364 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserRole {
+  ADMIN
+  TRAVEL_MANAGER
+  VIEWER
+}
+
+enum BookingStatus {
+  RESERVED
+  CONFIRMED
+  CANCELLED
+  EXPIRED
+}
+
+enum AuditEventType {
+  LOGIN
+  LOGOUT
+
+  BOOKING_RESERVED
+  BOOKING_CONFIRMED
+  BOOKING_CANCELLED
+  BOOKING_EXPIRED
+
+  WEBHOOK_CREATED
+  WEBHOOK_UPDATED
+  WEBHOOK_DELETED
+
+  PRICING_RULE_CREATED
+  PRICING_RULE_UPDATED
+
+  USER_CREATED
+  USER_UPDATED
+}
+
+enum PricingRuleType {
+  GROUP_SIZE
+  ADVANCE_BOOKING
+  SEASONAL
+}
+
+model Tenant {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  slug      String   @unique
+
+  createdAt DateTime @default(now())
+
+  users          User[]
+  suppliers      Supplier[]
+  experiences    Experience[]
+  bookings       Booking[]
+  availability   AvailabilitySlot[]
+  webhooks       TenantWebhook[]
+  auditLogs      AuditLog[]
+
+  @@map("tenants")
+}
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  tenantId     String   @db.Uuid
+
+  email        String
+  passwordHash String
+
+  role         UserRole
+
+  isActive     Boolean @default(true)
+
+  createdAt    DateTime @default(now())
+
+  tenant       Tenant @relation(fields: [tenantId], references: [id])
+
+  bookings     Booking[]
+
+  refreshTokenFamilies RefreshTokenFamily[]
+
+  auditLogs AuditLog[] @relation("AuditActor")
+
+  @@unique([tenantId, email])
+
+  @@index([tenantId])
+
+  @@map("users")
+}
+
+model RefreshTokenFamily {
+  id        String @id @default(uuid()) @db.Uuid
+
+  userId    String @db.Uuid
+
+  revoked   Boolean @default(false)
+
+  createdAt DateTime @default(now())
+
+  user       User @relation(fields: [userId], references: [id])
+
+  tokens     RefreshToken[]
+
+  @@map("refresh_token_families")
+}
+
+model RefreshToken {
+  id            String @id @default(uuid()) @db.Uuid
+
+  familyId      String @db.Uuid
+
+  tokenHash     String
+
+  revoked       Boolean @default(false)
+
+  replacedById  String? @db.Uuid
+
+  expiresAt     DateTime
+
+  createdAt     DateTime @default(now())
+
+  family        RefreshTokenFamily @relation(fields: [familyId], references: [id])
+
+  @@index([familyId])
+
+  @@map("refresh_tokens")
+}
+
+model Supplier {
+  id        String @id @default(uuid()) @db.Uuid
+
+  tenantId  String @db.Uuid
+
+  name      String
+
+  email     String?
+
+  createdAt DateTime @default(now())
+
+  tenant     Tenant @relation(fields: [tenantId], references: [id])
+
+  experiences Experience[]
+
+  pricingRules PricingRule[]
+
+  @@index([tenantId])
+
+  @@map("suppliers")
+}
+
+model Experience {
+  id          String @id @default(uuid()) @db.Uuid
+
+  tenantId    String @db.Uuid
+
+  supplierId  String @db.Uuid
+
+  title       String
+
+  destination String
+
+  description String?
+
+  basePrice   Decimal @db.Decimal(12,2)
+
+  capacity    Int
+
+  active      Boolean @default(true)
+
+  createdAt   DateTime @default(now())
+
+  tenant       Tenant @relation(fields: [tenantId], references: [id])
+
+  supplier     Supplier @relation(fields: [supplierId], references: [id])
+
+  slots        AvailabilitySlot[]
+
+  bookings     Booking[]
+
+  @@index([tenantId])
+  @@index([destination])
+
+  @@map("experiences")
+}
+
+model AvailabilitySlot {
+  id            String @id @default(uuid()) @db.Uuid
+
+  tenantId      String @db.Uuid
+
+  experienceId  String @db.Uuid
+
+  startsAt      DateTime
+  endsAt        DateTime
+
+  capacity      Int
+
+  reserved      Int @default(0)
+
+  version       Int @default(0)
+
+  createdAt     DateTime @default(now())
+
+  tenant         Tenant @relation(fields: [tenantId], references: [id])
+
+  experience     Experience @relation(fields: [experienceId], references: [id])
+
+  bookings       Booking[]
+
+  @@index([tenantId])
+  @@index([experienceId])
+  @@index([startsAt])
+
+  @@map("availability_slots")
+}
+
+model PricingRule {
+  id         String @id @default(uuid()) @db.Uuid
+
+  supplierId String @db.Uuid
+
+  ruleType   PricingRuleType
+
+  config     Json
+
+  active     Boolean @default(true)
+
+  createdAt  DateTime @default(now())
+
+  supplier   Supplier @relation(fields: [supplierId], references: [id])
+
+  @@index([supplierId])
+
+  @@map("pricing_rules")
+}
+
+model Booking {
+  id            String @id @default(uuid()) @db.Uuid
+
+  tenantId      String @db.Uuid
+
+  userId        String @db.Uuid
+
+  experienceId  String @db.Uuid
+
+  slotId        String @db.Uuid
+
+  partySize     Int
+
+  totalPrice    Decimal @db.Decimal(12,2)
+
+  status        BookingStatus
+
+  reservedUntil DateTime?
+
+  createdAt     DateTime @default(now())
+
+  tenant         Tenant @relation(fields: [tenantId], references: [id])
+
+  user           User @relation(fields: [userId], references: [id])
+
+  experience     Experience @relation(fields: [experienceId], references: [id])
+
+  slot           AvailabilitySlot @relation(fields: [slotId], references: [id])
+
+  history        BookingStatusHistory[]
+
+  @@index([tenantId])
+  @@index([status])
+
+  @@map("bookings")
+}
+
+model BookingStatusHistory {
+  id          String @id @default(uuid()) @db.Uuid
+
+  bookingId   String @db.Uuid
+
+  fromStatus  BookingStatus?
+
+  toStatus    BookingStatus
+
+  actorUserId String? @db.Uuid
+
+  createdAt   DateTime @default(now())
+
+  booking      Booking @relation(fields: [bookingId], references: [id])
+
+  @@index([bookingId])
+
+  @@map("booking_status_history")
+}
+
+model TenantWebhook {
+  id         String @id @default(uuid()) @db.Uuid
+
+  tenantId   String @db.Uuid
+
+  url        String
+
+  secret     String
+
+  active     Boolean @default(true)
+
+  createdAt  DateTime @default(now())
+
+  tenant      Tenant @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId])
+
+  @@map("tenant_webhooks")
+}
+
+model AuditLog {
+  id           String @id @default(uuid()) @db.Uuid
+
+  tenantId     String? @db.Uuid
+
+  actorUserId  String? @db.Uuid
+
+  eventType    AuditEventType
+
+  entityType   String
+
+  entityId     String? @db.Uuid
+
+  metadata     Json?
+
+  createdAt    DateTime @default(now())
+
+  tenant        Tenant? @relation(fields: [tenantId], references: [id])
+
+  actor         User? @relation("AuditActor", fields: [actorUserId],references: [id])
+
+  @@index([tenantId])
+  @@index([eventType])
+
+  @@map("audit_logs")
+}
+
+model OutboxEvent {
+  id          String @id @default(uuid()) @db.Uuid
+
+  eventType   String
+
+  payload     Json
+
+  processed   Boolean @default(false)
+
+  createdAt   DateTime @default(now())
+
+  @@index([processed])
+
+  @@map("outbox_events")
+}
