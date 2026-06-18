@@ -1,5 +1,6 @@
 import bcrypt from "bcryptjs";
-import { AuditEventType } from "../generated/prisma/client.js";
+import { AuditEntityType } from "../audit/entity-types.js";
+import { AuditEventType, type Prisma } from "../generated/prisma/client.js";
 import {
   generateRefreshToken,
   hashToken,
@@ -12,6 +13,7 @@ import {
   BadRequestError,
   UnauthorizedError,
 } from "../errors/index.js";
+import { withAuditedTransaction } from "../lib/audit.js";
 import { prisma } from "../lib/prisma.js";
 
 function toPublicUser(user: {
@@ -28,21 +30,22 @@ function toPublicUser(user: {
   };
 }
 
-async function createRefreshSession(userId: string): Promise<string> {
+async function createRefreshSession(
+  tx: Prisma.TransactionClient,
+  userId: string,
+): Promise<string> {
   const refreshToken = generateRefreshToken();
 
-  await prisma.$transaction(async (tx) => {
-    const family = await tx.refreshTokenFamily.create({
-      data: { userId },
-    });
+  const family = await tx.refreshTokenFamily.create({
+    data: { userId },
+  });
 
-    await tx.refreshToken.create({
-      data: {
-        familyId: family.id,
-        tokenHash: hashToken(refreshToken),
-        expiresAt: refreshTokenExpiresAt(),
-      },
-    });
+  await tx.refreshToken.create({
+    data: {
+      familyId: family.id,
+      tokenHash: hashToken(refreshToken),
+      expiresAt: refreshTokenExpiresAt(),
+    },
   });
 
   return refreshToken;
@@ -79,17 +82,16 @@ export async function login(
     throw new UnauthorizedError("Invalid credentials");
   }
 
-  const refreshToken = await createRefreshSession(user.id);
-
-  await prisma.auditLog.create({
-    data: {
+  const refreshToken = await withAuditedTransaction(
+    {
+      eventType: AuditEventType.LOGIN,
       tenantId: tenant.id,
       actorUserId: user.id,
-      eventType: AuditEventType.LOGIN,
-      entityType: "User",
+      entityType: AuditEntityType.User,
       entityId: user.id,
     },
-  });
+    async (tx) => createRefreshSession(tx, user.id),
+  );
 
   return {
     accessToken: signAccessToken(user),
@@ -194,25 +196,28 @@ export async function logout(refreshToken: string): Promise<void> {
     return;
   }
 
-  await prisma.$transaction([
-    prisma.refreshTokenFamily.update({
-      where: { id: storedToken.familyId },
-      data: { revoked: true },
-    }),
-    prisma.refreshToken.updateMany({
-      where: { familyId: storedToken.familyId },
-      data: { revoked: true },
-    }),
-    prisma.auditLog.create({
-      data: {
-        tenantId: storedToken.family.user.tenantId,
-        actorUserId: storedToken.family.user.id,
-        eventType: AuditEventType.LOGOUT,
-        entityType: "User",
-        entityId: storedToken.family.user.id,
-      },
-    }),
-  ]);
+  const { user } = storedToken.family;
+
+  await withAuditedTransaction(
+    {
+      eventType: AuditEventType.LOGOUT,
+      tenantId: user.tenantId,
+      actorUserId: user.id,
+      entityType: AuditEntityType.User,
+      entityId: user.id,
+    },
+    async (tx) => {
+      await tx.refreshTokenFamily.update({
+        where: { id: storedToken.familyId },
+        data: { revoked: true },
+      });
+
+      await tx.refreshToken.updateMany({
+        where: { familyId: storedToken.familyId },
+        data: { revoked: true },
+      });
+    },
+  );
 }
 
 export async function getCurrentUser(userId: string): Promise<PublicUser> {
