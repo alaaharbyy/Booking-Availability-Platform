@@ -18,7 +18,8 @@ Multi-tenant travel booking platform with availability management, pricing rules
 - **HTTP layer** (`src/http/`) — consistent API response envelope, `asyncHandler`, and typed success/error bodies
 - **Error types** (`src/errors/`) — reusable `AppError` subclasses (`NotFoundError`, `BadRequestError`, etc.)
 - **Health endpoint** (`GET /health`) — verifies server and database connectivity via `assertDatabaseHealthy()`
-- **Authentication** (`src/auth/`, `src/services/auth.service.ts`, `src/routes/auth.routes.ts`) — multi-tenant login with JWT access tokens and rotating refresh tokens stored in the database
+- **Authentication** (`src/auth/`, `src/services/auth.service.ts`, `src/routes/auth.routes.ts`) — multi-tenant login with JWT access tokens and rotating refresh tokens stored in the database; login and logout write audit records atomically with session changes
+- **Audit logging** (`src/lib/audit.ts`, `src/audit/entity-types.ts`) — `withAuditedTransaction` wraps `prisma.$transaction` so business writes and `audit_logs` inserts commit or roll back together; typed `AuditEntityType` constants for `entityType`
 - **Auth middleware** (`src/middleware/auth_middleware.ts`) — validates `Authorization: Bearer <token>` and attaches the user to `req.user`
 - **Request body validation** (`src/schemas/`, `src/middleware/validate-body.ts`) — Zod schemas per endpoint, validated before route handlers run
 
@@ -379,6 +380,54 @@ curl -s http://localhost:3000/auth/me \
   -H "Authorization: Bearer TOKEN"
 ```
 
+### Audit logging
+
+Mutating operations that should leave an audit trail use `withAuditedTransaction` from `src/lib/audit.ts`. The helper runs your callback inside a Prisma interactive transaction, then inserts a row into `audit_logs` using the same transactional client so both succeed or both roll back.
+
+**Event types** are defined by the `AuditEventType` enum in `prisma/schema.prisma` (e.g. `LOGIN`, `LOGOUT`, `BOOKING_CONFIRMED`, `WEBHOOK_CREATED`).
+
+**Entity types** are string constants in `src/audit/entity-types.ts` — use `AuditEntityType` instead of hardcoded strings:
+
+| Constant | Value |
+|----------|-------|
+| `AuditEntityType.Tenant` | `Tenant` |
+| `AuditEntityType.User` | `User` |
+| `AuditEntityType.Supplier` | `Supplier` |
+| `AuditEntityType.Experience` | `Experience` |
+| `AuditEntityType.AvailabilitySlot` | `AvailabilitySlot` |
+| `AuditEntityType.PricingRule` | `PricingRule` |
+| `AuditEntityType.Booking` | `Booking` |
+| `AuditEntityType.TenantWebhook` | `TenantWebhook` |
+
+**Example — wrap a service mutation**
+
+```typescript
+import { AuditEventType } from "../generated/prisma/client.js";
+import { AuditEntityType } from "../audit/entity-types.js";
+import { withAuditedTransaction } from "../lib/audit.js";
+
+await withAuditedTransaction(
+  {
+    eventType: AuditEventType.BOOKING_CONFIRMED,
+    tenantId,
+    actorUserId: userId,
+    entityType: AuditEntityType.Booking,
+    entityId: bookingId,
+    metadata: { previousStatus: "RESERVED" },
+  },
+  async (tx) => {
+    return tx.booking.update({
+      where: { id: bookingId },
+      data: { status: "CONFIRMED" },
+    });
+  },
+);
+```
+
+If you already have an open transaction callback, call `logAudit(tx, auditContext)` at the end instead. Inside any transaction, use only the `tx` client — not the global `prisma` instance — so all writes stay in the same transaction.
+
+Login and logout in `auth.service.ts` already use this pattern (`LOGIN` and `LOGOUT` events on the `User` entity).
+
 ## Seed data
 
 | Item | Details |
@@ -411,6 +460,8 @@ curl -s http://localhost:3000/auth/me \
 ├── src/
 │   ├── index.ts            # Server entry point (loads env, starts listener)
 │   ├── app.ts              # Express app, routes, global error middleware
+│   ├── audit/
+│   │   └── entity-types.ts # AuditEntityType constants for audit_logs.entityType
 │   ├── auth/
 │   │   ├── tokens.ts       # JWT signing, refresh token generation
 │   │   └── types.ts        # Auth-related TypeScript types
@@ -427,7 +478,8 @@ curl -s http://localhost:3000/auth/me \
 │   │   └── index.ts        # Public exports (barrel)
 │   ├── lib/
 │   │   ├── prisma.ts       # Shared Prisma client
-│   │   └── database.ts     # Database health checks
+│   │   ├── database.ts     # Database health checks
+│   │   └── audit.ts        # withAuditedTransaction / logAudit helpers
 │   ├── middleware/
 │   │   ├── auth_middleware.ts # Bearer JWT authentication
 │   │   └── validate-body.ts # Zod request body validation
