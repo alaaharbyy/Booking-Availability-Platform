@@ -18,6 +18,9 @@ Multi-tenant travel booking platform with availability management, pricing rules
 - **HTTP layer** (`src/http/`) — consistent API response envelope, `asyncHandler`, and typed success/error bodies
 - **Error types** (`src/errors/`) — reusable `AppError` subclasses (`NotFoundError`, `BadRequestError`, etc.)
 - **Health endpoint** (`GET /health`) — verifies server and database connectivity via `assertDatabaseHealthy()`
+- **Authentication** (`src/auth/`, `src/services/auth.service.ts`, `src/routes/auth.routes.ts`) — multi-tenant login with JWT access tokens and rotating refresh tokens stored in the database
+- **Auth middleware** (`src/middleware/auth_middleware.ts`) — validates `Authorization: Bearer <token>` and attaches the user to `req.user`
+- **Request body validation** (`src/schemas/`, `src/middleware/validate-body.ts`) — Zod schemas per endpoint, validated before route handlers run
 
 ## Prerequisites
 
@@ -58,8 +61,10 @@ Install all dependencies with `npm install`. These are the packages this project
 | `@prisma/adapter-pg` | `^7.8.0` | PostgreSQL driver adapter (required by Prisma 7) |
 | `pg` | `^8.21.0` | PostgreSQL client for Node.js |
 | `dotenv` | `^17.4.2` | Loads `.env` for Prisma CLI and seed script |
-| `bcryptjs` | `^3.0.3` | Password hashing in seed data |
+| `bcryptjs` | `^3.0.3` | Password hashing (seed data and login verification) |
 | `express` | `^5.1.0` | HTTP server |
+| `jsonwebtoken` | `^9.0.3` | JWT access and refresh token signing |
+| `zod` | `^4.4.3` | Request body schema validation |
 
 ### Development dependencies
 
@@ -69,6 +74,7 @@ Install all dependencies with `npm install`. These are the packages this project
 | `tsx` | `^4.22.4` | Runs TypeScript (seed script and API server) |
 | `@types/bcryptjs` | `^2.4.6` | TypeScript types for bcryptjs |
 | `@types/express` | `^5.0.3` | TypeScript types for Express |
+| `@types/jsonwebtoken` | `^9.0.10` | TypeScript types for jsonwebtoken |
 | `@types/pg` | `^8.20.0` | TypeScript types for pg |
 
 > **Note:** Do not rely on `npx prisma` alone without installing packages first — it downloads Prisma into a temp cache and is more likely to hit version/engine issues. Always run `npm install` in the project root first.
@@ -99,11 +105,17 @@ POSTGRES_USER=postgres
 POSTGRES_PASSWORD=postgres
 DATABASE_URL="postgresql://postgres:postgres@localhost:5433/booking-availability-platform"
 PORT=3000
+
+JWT_ACCESS_SECRET=change-me-in-production-use-a-long-random-string
+JWT_REFRESH_SECRET=change-me-refresh-secret-in-production
+JWT_ACCESS_EXPIRES_IN=15m
+JWT_REFRESH_EXPIRES_IN=30d
 ```
 
 **Important:**
 
 - Use a **full connection string** in `DATABASE_URL`. Unlike Docker Compose, `.env` files do **not** expand `${POSTGRES_USER}`-style references.
+- Set strong, unique values for `JWT_ACCESS_SECRET` and `JWT_REFRESH_SECRET` in production.
 - Postgres is mapped to host port **5433** (not 5432) to avoid conflicts with a local PostgreSQL installation. If you have no other Postgres running, you can change the compose port mapping to `5432:5432` and update `DATABASE_URL` accordingly.
 
 ### 3. Start the database
@@ -182,20 +194,42 @@ All endpoints return a consistent envelope:
 }
 ```
 
-Route handlers should use `asyncHandler`, `sendSuccess`, and throw errors from `src/errors`. The global error middleware in `src/app.ts` converts them into the standard error envelope.
+Route handlers should use `asyncHandler`, `sendSuccess`, and throw errors from `src/errors`. POST routes with a JSON body should use `validateBody` with a Zod schema from `src/schemas/`. The global error middleware in `src/app.ts` converts them into the standard error envelope.
 
 ```typescript
 import { asyncHandler, sendSuccess } from "./http/index.js";
 import { NotFoundError } from "./errors/index.js";
+import { validateBody } from "./middleware/validate-body.js";
+import { createItemBodySchema } from "./schemas/item.schemas.js";
 
-app.get(
-  "/example/:id",
+app.post,
+  "/example",
+  validateBody(createItemBodySchema),
   asyncHandler(async (req, res) => {
-    const item = await findItem(req.params.id);
-    if (!item) throw new NotFoundError("Item not found");
-    sendSuccess(res, item);
+    const item = await createItem(req.body);
+    sendSuccess(res, item, 201);
   }),
 );
+```
+
+### Request body validation
+
+Request bodies are defined as Zod schemas in `src/schemas/` and validated by `validateBody` middleware before the handler runs. Invalid bodies return **400 Bad Request**:
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "BAD_REQUEST",
+    "message": "Invalid request body",
+    "details": {
+      "issues": [
+        { "path": "email", "message": "Invalid email address" }
+      ]
+    }
+  },
+  "meta": { "timestamp": "2026-06-17T07:16:41.975Z" }
+}
 ```
 
 ### `GET /health`
@@ -235,11 +269,121 @@ Health check — confirms the server is running and the database is reachable.
 }
 ```
 
+### Authentication
+
+All auth routes are mounted under `/auth`. Protected routes require an `Authorization: Bearer <accessToken>` header.
+
+#### `POST /auth/login`
+
+Sign in with tenant slug, email, and password.
+
+**Request body**
+
+```json
+{
+  "tenantSlug": "summit-adventures",
+  "email": "admin@summit-adventures.com",
+  "password": "Password123!"
+}
+```
+
+**200 OK**
+
+```json
+{
+  "success": true,
+  "data": {
+    "accessToken": "<jwt>",
+    "refreshToken": "<opaque-token>",
+    "expiresIn": 900,
+    "user": {
+      "id": "...",
+      "tenantId": "...",
+      "email": "admin@summit-adventures.com",
+      "role": "ADMIN"
+    }
+  },
+  "meta": { "timestamp": "2026-06-17T07:16:41.975Z" }
+}
+```
+
+**401 Unauthorized** — invalid credentials.
+
+#### `POST /auth/refresh`
+
+Exchange a refresh token for a new access/refresh token pair.
+
+**Request body**
+
+```json
+{
+  "refreshToken": "<refresh-token-from-login>"
+}
+```
+
+**200 OK** — returns `accessToken`, `refreshToken`, and `expiresIn`.
+
+#### `POST /auth/logout`
+
+Revoke a refresh token.
+
+**Request body**
+
+```json
+{
+  "refreshToken": "<refresh-token>"
+}
+```
+
+**200 OK**
+
+```json
+{
+  "success": true,
+  "data": { "loggedOut": true },
+  "meta": { "timestamp": "2026-06-17T07:16:41.975Z" }
+}
+```
+
+#### `GET /auth/me`
+
+Returns the currently authenticated user. Requires a valid access token.
+
+**200 OK**
+
+```json
+{
+  "success": true,
+  "data": {
+    "user": {
+      "id": "...",
+      "tenantId": "...",
+      "email": "admin@summit-adventures.com",
+      "role": "ADMIN"
+    }
+  },
+  "meta": { "timestamp": "2026-06-17T07:16:41.975Z" }
+}
+```
+
+**Example**
+
+```bash
+# Login
+curl -s -X POST http://localhost:3000/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"tenantSlug":"summit-adventures","email":"admin@summit-adventures.com","password":"Password123!"}'
+
+# Get current user (replace TOKEN with accessToken from login)
+curl -s http://localhost:3000/auth/me \
+  -H "Authorization: Bearer TOKEN"
+```
+
 ## Seed data
 
 | Item | Details |
 |------|---------|
-| Tenants | Summit Adventures, Coastal Escapes |
+| Tenants | Summit Adventures (`summit-adventures`), Coastal Escapes (`coastal-escapes`) |
 | Users | 5 users across both tenants |
 | Password (all users) | `Password123!` |
 | Sample logins | `admin@summit-adventures.com`, `manager@coastal-escapes.com`, `viewer@summit-adventures.com` |
@@ -267,6 +411,11 @@ Health check — confirms the server is running and the database is reachable.
 ├── src/
 │   ├── index.ts            # Server entry point (loads env, starts listener)
 │   ├── app.ts              # Express app, routes, global error middleware
+│   ├── auth/
+│   │   ├── tokens.ts       # JWT signing, refresh token generation
+│   │   └── types.ts        # Auth-related TypeScript types
+│   ├── config/
+│   │   └── env.ts          # Environment variable parsing
 │   ├── errors/
 │   │   ├── app-error.ts    # Base AppError class
 │   │   ├── http-errors.ts  # HTTP-specific error subclasses
@@ -279,6 +428,17 @@ Health check — confirms the server is running and the database is reachable.
 │   ├── lib/
 │   │   ├── prisma.ts       # Shared Prisma client
 │   │   └── database.ts     # Database health checks
+│   ├── middleware/
+│   │   ├── auth_middleware.ts # Bearer JWT authentication
+│   │   └── validate-body.ts # Zod request body validation
+│   ├── routes/
+│   │   └── auth.routes.ts  # Login, refresh, logout, me
+│   ├── schemas/
+│   │   └── auth.schemas.ts # Zod schemas for auth request bodies
+│   ├── services/
+│   │   └── auth.service.ts # Auth business logic
+│   ├── types/
+│   │   └── express.d.ts    # Express Request augmentation (req.user)
 │   └── generated/prisma/   # Generated client (not committed)
 ├── .env.example            # Environment template
 └── .env                    # Local secrets (not committed)

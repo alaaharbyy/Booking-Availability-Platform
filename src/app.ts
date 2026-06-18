@@ -5,8 +5,11 @@ import express, {
 } from "express";
 import { asyncHandler, sendError, sendSuccess } from "./http/index.js";
 import { assertDatabaseHealthy } from "./lib/database.js";
+import { authRouter } from "./routes/auth.routes.js";
 
 export const app = express();
+
+app.use(express.json());
 
 app.get(
   "/health",
@@ -15,6 +18,8 @@ app.get(
     sendSuccess(res, { status: "ok", database: "connected" });
   }),
 );
+
+app.use("/auth", authRouter);
 
 app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
   sendError(res, err);

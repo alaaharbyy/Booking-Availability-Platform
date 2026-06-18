@@ -131,6 +131,7 @@ model RefreshToken {
   family        RefreshTokenFamily @relation(fields: [familyId], references: [id])
 
   @@index([familyId])
+  @@index([tokenHash])
 
   @@map("refresh_tokens")
 }
