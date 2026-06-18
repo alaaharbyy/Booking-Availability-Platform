@@ -83,6 +83,7 @@ export async function login(
   }
 
   const refreshToken = await withAuditedTransaction(
+    async (tx) => createRefreshSession(tx, user.id),
     {
       eventType: AuditEventType.LOGIN,
       tenantId: tenant.id,
@@ -90,7 +91,6 @@ export async function login(
       entityType: AuditEntityType.User,
       entityId: user.id,
     },
-    async (tx) => createRefreshSession(tx, user.id),
   );
 
   return {
@@ -199,13 +199,6 @@ export async function logout(refreshToken: string): Promise<void> {
   const { user } = storedToken.family;
 
   await withAuditedTransaction(
-    {
-      eventType: AuditEventType.LOGOUT,
-      tenantId: user.tenantId,
-      actorUserId: user.id,
-      entityType: AuditEntityType.User,
-      entityId: user.id,
-    },
     async (tx) => {
       await tx.refreshTokenFamily.update({
         where: { id: storedToken.familyId },
@@ -216,6 +209,13 @@ export async function logout(refreshToken: string): Promise<void> {
         where: { familyId: storedToken.familyId },
         data: { revoked: true },
       });
+    },
+    {
+      eventType: AuditEventType.LOGOUT,
+      tenantId: user.tenantId,
+      actorUserId: user.id,
+      entityType: AuditEntityType.User,
+      entityId: user.id,
     },
   );
 }

@@ -11,7 +11,7 @@ export type AuditContext = {
   metadata?: Prisma.InputJsonValue;
 };
 
-export async function logAudit(
+async function logAudit(
   tx: Prisma.TransactionClient,
   audit: AuditContext,
 ): Promise<void> {
@@ -28,12 +28,13 @@ export async function logAudit(
 }
 
 export async function withAuditedTransaction<T>(
-  audit: AuditContext,
   fn: (tx: Prisma.TransactionClient) => Promise<T>,
+  audit: AuditContext | ((result: T) => AuditContext),
 ): Promise<T> {
   return prisma.$transaction(async (tx) => {
     const result = await fn(tx);
-    await logAudit(tx, audit);
+    const context = typeof audit === "function" ? audit(result) : audit;
+    await logAudit(tx, context);
     return result;
   });
 }

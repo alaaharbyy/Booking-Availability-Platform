@@ -1,3 +1,12 @@
+import { randomBytes } from "node:crypto";
+
+export function generateBookingReference(): string {
+  const suffix = randomBytes(4).toString("hex").toUpperCase();
+  return `BK-${suffix}`;
+}
+
+
+
 export function parseUtcDate(date: string): Date {
   return new Date(`${date}T00:00:00.000Z`);
 }

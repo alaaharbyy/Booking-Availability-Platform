@@ -43,6 +43,7 @@ function optionalInt(name: string, fallback: number): number {
 
 const jwtAccessExpiresIn = process.env.JWT_ACCESS_EXPIRES_IN ?? "15m";
 const jwtRefreshExpiresIn = process.env.JWT_REFRESH_EXPIRES_IN ?? "30d";
+const bookingReserveTtl = process.env.BOOKING_RESERVE_TTL ?? "15m";
 
 export const env = {
   port: optionalInt("PORT", 3000),
@@ -53,4 +54,5 @@ export const env = {
   jwtRefreshExpiresIn,
   jwtAccessExpiresInSeconds: parseDurationToSeconds(jwtAccessExpiresIn),
   jwtRefreshExpiresInSeconds: parseDurationToSeconds(jwtRefreshExpiresIn),
+  bookingReserveTtlSeconds: parseDurationToSeconds(bookingReserveTtl),
 } as const;

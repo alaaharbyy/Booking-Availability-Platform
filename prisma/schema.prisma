@@ -247,6 +247,8 @@ model PricingRule {
 model Booking {
   id            String @id @default(uuid()) @db.Uuid
 
+  reference     String @unique
+
   tenantId      String @db.Uuid
 
   userId        String @db.Uuid
@@ -291,6 +293,8 @@ model BookingStatusHistory {
   toStatus    BookingStatus
 
   actorUserId String? @db.Uuid
+
+  reason      String?
 
   createdAt   DateTime @default(now())
 

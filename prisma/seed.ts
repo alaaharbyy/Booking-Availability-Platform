@@ -275,6 +275,7 @@ async function main() {
   console.log("Creating bookings...");
   const confirmedBooking = await prisma.booking.create({
     data: {
+      reference: "BK-CONFIRM1",
       tenantId: summit.id,
       userId: summitViewer.id,
       experienceId: glacierHike.id,
@@ -287,6 +288,7 @@ async function main() {
 
   const reservedBooking = await prisma.booking.create({
     data: {
+      reference: "BK-RESERVED",
       tenantId: summit.id,
       userId: summitManager.id,
       experienceId: summitTrek.id,
@@ -300,6 +302,7 @@ async function main() {
 
   const cancelledBooking = await prisma.booking.create({
     data: {
+      reference: "BK-CANCEL1",
       tenantId: coastal.id,
       userId: coastalManager.id,
       experienceId: kayakTour.id,
@@ -312,6 +315,7 @@ async function main() {
 
   const expiredBooking = await prisma.booking.create({
     data: {
+      reference: "BK-EXPIRED1",
       tenantId: coastal.id,
       userId: coastalAdmin.id,
       experienceId: wineTour.id,
@@ -355,6 +359,7 @@ async function main() {
         fromStatus: BookingStatus.RESERVED,
         toStatus: BookingStatus.CANCELLED,
         actorUserId: coastalAdmin.id,
+        reason: "Customer requested cancellation",
       },
       {
         bookingId: expiredBooking.id,

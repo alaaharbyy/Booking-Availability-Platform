@@ -6,6 +6,7 @@ import express, {
 import { asyncHandler, sendError, sendSuccess } from "./http/index.js";
 import { assertDatabaseHealthy } from "./lib/database.js";
 import { authRouter } from "./routes/auth.routes.js";
+import { bookingsRouter } from "./routes/bookings.routes.js";
 import { experiencesRouter } from "./routes/experiences.routes.js";
 
 export const app = express();
@@ -21,6 +22,7 @@ app.get(
 );
 
 app.use("/auth", authRouter);
+app.use("/bookings", bookingsRouter);
 app.use("/experiences", experiencesRouter);
 
 app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
