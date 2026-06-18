@@ -1,5 +1,5 @@
 import bcrypt from "bcryptjs";
-import { AuditEntityType } from "../audit/entity-types.js";
+import { AuditEntityType } from "../constants/entity-types.js";
 import { AuditEventType, type Prisma } from "../generated/prisma/client.js";
 import {
   generateRefreshToken,

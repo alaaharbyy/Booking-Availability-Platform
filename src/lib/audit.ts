@@ -1,4 +1,4 @@
-import type { AuditEntityType } from "../audit/entity-types.js";
+import type { AuditEntityType } from "../constants/entity-types.js";
 import type { AuditEventType, Prisma } from "../generated/prisma/client.js";
 import { prisma } from "./prisma.js";
 

@@ -1,11 +1,11 @@
 import { Router } from "express";
 import { asyncHandler, sendSuccess } from "../http/index.js";
 import { authMiddleware } from "../middleware/auth_middleware.js";
-import { validateBody } from "../middleware/validate-body.js";
+import { validateRequest } from "../middleware/validate-request.js";
 import {
   loginBodySchema,
   refreshTokenBodySchema,
-} from "../schemas/auth.schemas.js";
+} from "../schemas/requests/auth.requests.js";
 import {
   getCurrentUser,
   login,
@@ -17,7 +17,7 @@ export const authRouter = Router();
 
 authRouter.post(
   "/login",
-  validateBody(loginBodySchema),
+  validateRequest({ body: loginBodySchema }),
   asyncHandler(async (req, res) => {
     const { tenantSlug, email, password } = req.body;
     const result = await login(tenantSlug, email, password);
@@ -27,7 +27,7 @@ authRouter.post(
 
 authRouter.post(
   "/refresh",
-  validateBody(refreshTokenBodySchema),
+  validateRequest({ body: refreshTokenBodySchema }),
   asyncHandler(async (req, res) => {
     const { refreshToken } = req.body;
     const tokens = await refreshAccessToken(refreshToken);
@@ -37,7 +37,7 @@ authRouter.post(
 
 authRouter.post(
   "/logout",
-  validateBody(refreshTokenBodySchema),
+  validateRequest({ body: refreshTokenBodySchema }),
   asyncHandler(async (req, res) => {
     const { refreshToken } = req.body;
     await logout(refreshToken);

@@ -19,9 +19,10 @@ Multi-tenant travel booking platform with availability management, pricing rules
 - **Error types** (`src/errors/`) — reusable `AppError` subclasses (`NotFoundError`, `BadRequestError`, etc.)
 - **Health endpoint** (`GET /health`) — verifies server and database connectivity via `assertDatabaseHealthy()`
 - **Authentication** (`src/auth/`, `src/services/auth.service.ts`, `src/routes/auth.routes.ts`) — multi-tenant login with JWT access tokens and rotating refresh tokens stored in the database; login and logout write audit records atomically with session changes
-- **Audit logging** (`src/lib/audit.ts`, `src/audit/entity-types.ts`) — `withAuditedTransaction` wraps `prisma.$transaction` so business writes and `audit_logs` inserts commit or roll back together; typed `AuditEntityType` constants for `entityType`
+- **Audit logging** (`src/lib/audit.ts`, `src/constants/entity-types.ts`) — `withAuditedTransaction` wraps `prisma.$transaction` so business writes and `audit_logs` inserts commit or roll back together; typed `AuditEntityType` constants for `entityType`
 - **Auth middleware** (`src/middleware/auth_middleware.ts`) — validates `Authorization: Bearer <token>` and attaches the user to `req.user`
-- **Request body validation** (`src/schemas/`, `src/middleware/validate-body.ts`) — Zod schemas per endpoint, validated before route handlers run
+- **Request validation** (`src/schemas/requests/`, `src/middleware/validate-request.ts`) — Zod schemas for incoming body, query, and route params; parsed values are stored on `req.validated` (required for Express 5, where `req.query` and `req.params` are read-only)
+- **Experience search & pricing** (`GET /experiences`, `GET /experiences/:id`) — tenant-scoped search by destination, date range, party size, and price range; availability filtering, grouping, sorting, and pagination run in PostgreSQL; pricing previews are computed in application code from supplier pricing rules (group size, advance booking, seasonal) with Zod-validated JSONB rule configs
 
 ## Prerequisites
 
@@ -29,11 +30,13 @@ Multi-tenant travel booking platform with availability management, pricing rules
 
 **Prisma 7 will not run on older Node versions.** You must use one of:
 
-| Requirement | Version |
-|-------------|---------|
-| **Minimum** | Node.js **20.19.0** |
+
+| Requirement        | Version                             |
+| ------------------ | ----------------------------------- |
+| **Minimum**        | Node.js **20.19.0**                 |
 | **Also supported** | Node.js **22.12.0+** or **24.0.0+** |
-| **Recommended** | Node.js **22 LTS** (latest) |
+| **Recommended**    | Node.js **22 LTS** (latest)         |
+
 
 Check your version:
 
@@ -45,10 +48,12 @@ If you see `v20.13.x` or lower, upgrade before continuing. On Windows, download 
 
 ### Other tools
 
-| Tool | Version used in this project |
-|------|------------------------------|
+
+| Tool           | Version used in this project  |
+| -------------- | ----------------------------- |
 | Docker Desktop | Latest (for Postgres + Redis) |
-| npm | 10+ (ships with Node) |
+| npm            | 10+ (ships with Node)         |
+
 
 ## Required packages
 
@@ -56,27 +61,31 @@ Install all dependencies with `npm install`. These are the packages this project
 
 ### Production dependencies
 
-| Package | Version | Purpose |
-|---------|---------|---------|
-| `@prisma/client` | `^7.8.0` | Prisma ORM client (generated after `prisma generate`) |
-| `@prisma/adapter-pg` | `^7.8.0` | PostgreSQL driver adapter (required by Prisma 7) |
-| `pg` | `^8.21.0` | PostgreSQL client for Node.js |
-| `dotenv` | `^17.4.2` | Loads `.env` for Prisma CLI and seed script |
-| `bcryptjs` | `^3.0.3` | Password hashing (seed data and login verification) |
-| `express` | `^5.1.0` | HTTP server |
-| `jsonwebtoken` | `^9.0.3` | JWT access and refresh token signing |
-| `zod` | `^4.4.3` | Request body schema validation |
+
+| Package              | Version   | Purpose                                               |
+| -------------------- | --------- | ----------------------------------------------------- |
+| `@prisma/client`     | `^7.8.0`  | Prisma ORM client (generated after `prisma generate`) |
+| `@prisma/adapter-pg` | `^7.8.0`  | PostgreSQL driver adapter (required by Prisma 7)      |
+| `pg`                 | `^8.21.0` | PostgreSQL client for Node.js                         |
+| `dotenv`             | `^17.4.2` | Loads `.env` for Prisma CLI and seed script           |
+| `bcryptjs`           | `^3.0.3`  | Password hashing (seed data and login verification)   |
+| `express`            | `^5.1.0`  | HTTP server                                           |
+| `jsonwebtoken`       | `^9.0.3`  | JWT access and refresh token signing                  |
+| `zod`                | `^4.4.3`  | Request schema validation                             |
+
 
 ### Development dependencies
 
-| Package | Version | Purpose |
-|---------|---------|---------|
-| `prisma` | `^7.8.0` | Prisma CLI (migrate, generate, seed) |
-| `tsx` | `^4.22.4` | Runs TypeScript (seed script and API server) |
-| `@types/bcryptjs` | `^2.4.6` | TypeScript types for bcryptjs |
-| `@types/express` | `^5.0.3` | TypeScript types for Express |
-| `@types/jsonwebtoken` | `^9.0.10` | TypeScript types for jsonwebtoken |
-| `@types/pg` | `^8.20.0` | TypeScript types for pg |
+
+| Package               | Version   | Purpose                                      |
+| --------------------- | --------- | -------------------------------------------- |
+| `prisma`              | `^7.8.0`  | Prisma CLI (migrate, generate, seed)         |
+| `tsx`                 | `^4.22.4` | Runs TypeScript (seed script and API server) |
+| `@types/bcryptjs`     | `^2.4.6`  | TypeScript types for bcryptjs                |
+| `@types/express`      | `^5.0.3`  | TypeScript types for Express                 |
+| `@types/jsonwebtoken` | `^9.0.10` | TypeScript types for jsonwebtoken            |
+| `@types/pg`           | `^8.20.0` | TypeScript types for pg                      |
+
 
 > **Note:** Do not rely on `npx prisma` alone without installing packages first — it downloads Prisma into a temp cache and is more likely to hit version/engine issues. Always run `npm install` in the project root first.
 
@@ -174,6 +183,7 @@ curl http://localhost:3000/health
 All endpoints return a consistent envelope:
 
 **Success**
+
 ```json
 {
   "success": true,
@@ -183,6 +193,7 @@ All endpoints return a consistent envelope:
 ```
 
 **Error**
+
 ```json
 {
   "success": false,
@@ -195,17 +206,17 @@ All endpoints return a consistent envelope:
 }
 ```
 
-Route handlers should use `asyncHandler`, `sendSuccess`, and throw errors from `src/errors`. POST routes with a JSON body should use `validateBody` with a Zod schema from `src/schemas/`. The global error middleware in `src/app.ts` converts them into the standard error envelope.
+Route handlers should use `asyncHandler`, `sendSuccess`, and throw errors from `src/errors`. Use `validateRequest` with Zod schemas from `src/schemas/requests/` to validate the body, query string, and/or route params before the handler runs. Handlers read parsed query and params from `req.validated` (Express 5 does not allow assigning back to `req.query` or `req.params`). The global error middleware in `src/app.ts` converts thrown errors into the standard error envelope.
 
 ```typescript
 import { asyncHandler, sendSuccess } from "./http/index.js";
 import { NotFoundError } from "./errors/index.js";
-import { validateBody } from "./middleware/validate-body.js";
-import { createItemBodySchema } from "./schemas/item.schemas.js";
+import { validateRequest } from "./middleware/validate-request.js";
+import { createItemBodySchema } from "./schemas/requests/item.requests.js";
 
-app.post,
+app.post(
   "/example",
-  validateBody(createItemBodySchema),
+  validateRequest({ body: createItemBodySchema }),
   asyncHandler(async (req, res) => {
     const item = await createItem(req.body);
     sendSuccess(res, item, 201);
@@ -213,9 +224,39 @@ app.post,
 );
 ```
 
-### Request body validation
+### Request validation
 
-Request bodies are defined as Zod schemas in `src/schemas/` and validated by `validateBody` middleware before the handler runs. Invalid bodies return **400 Bad Request**:
+Inputs are defined as Zod schemas in `src/schemas/requests/` and validated by `validateRequest` before the handler runs. Pass whichever parts apply to the route:
+
+```typescript
+validateRequest({ body: loginBodySchema });                              // POST JSON body
+validateRequest({ query: experienceSearchQuerySchema });                 // GET ?query=params
+validateRequest({ params: experienceIdParamsSchema, query: detailSchema }); // GET /:id?query
+```
+
+Parsed output is stored on `req.validated`:
+
+
+| Part     | Read in handler                     |
+| -------- | ----------------------------------- |
+| `body`   | `req.body` and `req.validated.body` |
+| `query`  | `req.validated.query`               |
+| `params` | `req.validated.params`              |
+
+
+```typescript
+experiencesRouter.get(
+  "/:id",
+  validateRequest({ params: experienceIdParamsSchema, query: experienceDetailQuerySchema }),
+  asyncHandler(async (req, res) => {
+    const { id } = req.validated!.params as ExperienceIdParams;
+    const query = req.validated!.query as ExperienceDetailQuery;
+    // ...
+  }),
+);
+```
+
+Invalid input returns **400 Bad Request**:
 
 ```json
 {
@@ -380,30 +421,180 @@ curl -s http://localhost:3000/auth/me \
   -H "Authorization: Bearer TOKEN"
 ```
 
+### Experiences
+
+#### `GET /experiences`
+
+Search and filter bookable experiences for the authenticated user's tenant. Returns one row per experience that has at least one available slot in the date range. Requires a valid access token.
+
+**Query parameters**
+
+
+| Parameter     | Required | Default                   | Description                                                   |
+| ------------- | -------- | ------------------------- | ------------------------------------------------------------- |
+| `destination` | No       | — (all destinations)      | Case-insensitive partial match (e.g. `Italy`, `Chamonix`)     |
+| `start_date`  | No       | Today (UTC)               | Range start, inclusive (`YYYY-MM-DD`)                         |
+| `end_date`    | No       | Today + 90 days (UTC)     | Range end, inclusive (`YYYY-MM-DD`)                           |
+| `party_size`  | No       | `1`                       | Minimum free spots required per slot (1–100)                  |
+| `supplier_id` | No       | —                         | Filter by supplier UUID                                       |
+| `min_price`   | No       | —                         | Minimum experience `basePrice`                                |
+| `max_price`   | No       | —                         | Maximum experience `basePrice`                                |
+| `sort_by`     | No       | `starts_at`               | `starts_at`, `price`, `title`, or `available_spots`           |
+| `sort_order`  | No       | `asc`                     | `asc` or `desc`                                               |
+| `page`        | No       | `1`                       | Page number                                                   |
+| `page_size`   | No       | `20`                      | Results per page (max `100`)                                  |
+
+
+`fromPrice` is the lowest total price for `party_size` across matching slots after applying supplier pricing rules (group size, advance booking, seasonal).
+
+Search runs availability filtering, grouping, sorting, and pagination in PostgreSQL. Pricing previews are computed in application code because rule logic (e.g. seasonal surcharges, group discounts) cannot be expressed purely in SQL. Sorting by `price` fetches all matching experiences first, computes `fromPrice`, then paginates in memory.
+
+**200 OK**
+
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "id": "...",
+        "title": "Glacier Hike & Ice Caves",
+        "destination": "Chamonix, France",
+        "description": "Guided glacier trek...",
+        "basePrice": "189",
+        "capacity": 12,
+        "supplier": { "id": "...", "name": "Alpine Guides Co." },
+        "partySize": 4,
+        "fromPrice": "680.40",
+        "availableSlots": 2,
+        "earliestSlotAt": "2026-06-24T08:00:00.000Z"
+      }
+    ],
+    "pagination": {
+      "page": 1,
+      "pageSize": 20,
+      "totalItems": 1,
+      "totalPages": 1
+    }
+  },
+  "meta": { "timestamp": "2026-06-17T07:16:41.975Z" }
+}
+```
+
+**Examples**
+
+```bash
+# Search with no filters (defaults: party_size=1, today → +90 days, all destinations)
+curl -s "http://localhost:3000/experiences" \
+  -H "Authorization: Bearer TOKEN"
+
+# Search with filters
+curl -s "http://localhost:3000/experiences?destination=France&start_date=2026-06-18&end_date=2026-07-18&party_size=4" \
+  -H "Authorization: Bearer TOKEN"
+```
+
+#### `GET /experiences/:id`
+
+Experience detail with a real-time pricing preview and per-slot pricing for available slots. Requires a valid access token.
+
+**Query parameters**
+
+
+| Parameter    | Required | Description                                                                             |
+| ------------ | -------- | --------------------------------------------------------------------------------------- |
+| `party_size` | No       | Party size used for pricing and slot availability (1–100); defaults to `1` when omitted |
+| `slot_id`    | No       | Focus pricing on a specific slot; returns 404 if not found on this experience           |
+| `start_date` | No       | Filter returned slots — range start (`YYYY-MM-DD`)                                      |
+| `end_date`   | No       | Filter returned slots — range end (`YYYY-MM-DD`)                                        |
+
+
+Top-level `pricingPreview` uses the selected `slot_id`, or the earliest available slot when omitted. Each item in `slots` includes its own `pricingPreview` with date-aware rules applied. Only slots with enough free capacity for `party_size` are returned.
+
+**200 OK**
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": "...",
+    "title": "Glacier Hike & Ice Caves",
+    "destination": "Chamonix, France",
+    "description": "Guided glacier trek...",
+    "basePrice": "189",
+    "capacity": 12,
+    "supplier": {
+      "id": "...",
+      "name": "Alpine Guides Co.",
+      "email": "ops@alpineguides.com"
+    },
+    "partySize": 4,
+    "pricingPreview": {
+      "partySize": 4,
+      "basePricePerPerson": "189.00",
+      "subtotal": "756.00",
+      "adjustments": [],
+      "totalPrice": "756.00"
+    },
+    "slots": [
+      {
+        "slotId": "...",
+        "startsAt": "2026-06-24T08:00:00.000Z",
+        "endsAt": "2026-06-24T13:00:00.000Z",
+        "slotCapacity": 12,
+        "reserved": 4,
+        "availableSpots": 8,
+        "pricingPreview": {
+          "partySize": 4,
+          "basePricePerPerson": "189.00",
+          "subtotal": "756.00",
+          "adjustments": [],
+          "totalPrice": "756.00"
+        }
+      }
+    ]
+  },
+  "meta": { "timestamp": "2026-06-17T07:16:41.975Z" }
+}
+```
+
+**Examples**
+
+```bash
+# Detail without party_size (defaults to 1)
+curl -s "http://localhost:3000/experiences/<experience-id>" \
+  -H "Authorization: Bearer TOKEN"
+
+# Detail with party size and date filter
+curl -s "http://localhost:3000/experiences/<experience-id>?party_size=6&start_date=2026-06-18&end_date=2026-12-31" \
+  -H "Authorization: Bearer TOKEN"
+```
+
 ### Audit logging
 
 Mutating operations that should leave an audit trail use `withAuditedTransaction` from `src/lib/audit.ts`. The helper runs your callback inside a Prisma interactive transaction, then inserts a row into `audit_logs` using the same transactional client so both succeed or both roll back.
 
 **Event types** are defined by the `AuditEventType` enum in `prisma/schema.prisma` (e.g. `LOGIN`, `LOGOUT`, `BOOKING_CONFIRMED`, `WEBHOOK_CREATED`).
 
-**Entity types** are string constants in `src/audit/entity-types.ts` — use `AuditEntityType` instead of hardcoded strings:
+**Entity types** are string constants in `src/constants/entity-types.ts` — use `AuditEntityType` instead of hardcoded strings:
 
-| Constant | Value |
-|----------|-------|
-| `AuditEntityType.Tenant` | `Tenant` |
-| `AuditEntityType.User` | `User` |
-| `AuditEntityType.Supplier` | `Supplier` |
-| `AuditEntityType.Experience` | `Experience` |
+
+| Constant                           | Value              |
+| ---------------------------------- | ------------------ |
+| `AuditEntityType.Tenant`           | `Tenant`           |
+| `AuditEntityType.User`             | `User`             |
+| `AuditEntityType.Supplier`         | `Supplier`         |
+| `AuditEntityType.Experience`       | `Experience`       |
 | `AuditEntityType.AvailabilitySlot` | `AvailabilitySlot` |
-| `AuditEntityType.PricingRule` | `PricingRule` |
-| `AuditEntityType.Booking` | `Booking` |
-| `AuditEntityType.TenantWebhook` | `TenantWebhook` |
+| `AuditEntityType.PricingRule`      | `PricingRule`      |
+| `AuditEntityType.Booking`          | `Booking`          |
+| `AuditEntityType.TenantWebhook`    | `TenantWebhook`    |
+
 
 **Example — wrap a service mutation**
 
 ```typescript
 import { AuditEventType } from "../generated/prisma/client.js";
-import { AuditEntityType } from "../audit/entity-types.js";
+import { AuditEntityType } from "../constants/entity-types.js";
 import { withAuditedTransaction } from "../lib/audit.js";
 
 await withAuditedTransaction(
@@ -430,23 +621,27 @@ Login and logout in `auth.service.ts` already use this pattern (`LOGIN` and `LOG
 
 ## Seed data
 
-| Item | Details |
-|------|---------|
-| Tenants | Summit Adventures (`summit-adventures`), Coastal Escapes (`coastal-escapes`) |
-| Users | 5 users across both tenants |
-| Password (all users) | `Password123!` |
-| Sample logins | `admin@summit-adventures.com`, `manager@coastal-escapes.com`, `viewer@summit-adventures.com` |
-| Bookings | One each in CONFIRMED, RESERVED, CANCELLED, and EXPIRED status |
+
+| Item                 | Details                                                                                      |
+| -------------------- | -------------------------------------------------------------------------------------------- |
+| Tenants              | Summit Adventures (`summit-adventures`), Coastal Escapes (`coastal-escapes`)                 |
+| Users                | 5 users across both tenants                                                                  |
+| Password (all users) | `Password123!`                                                                               |
+| Sample logins        | `admin@summit-adventures.com`, `manager@coastal-escapes.com`, `viewer@summit-adventures.com` |
+| Bookings             | One each in CONFIRMED, RESERVED, CANCELLED, and EXPIRED status                               |
+
 
 ## npm scripts
 
-| Script | Command | Description |
-|--------|---------|-------------|
-| `npm start` | `tsx src/index.ts` | Start the API server |
-| `npm run dev` | `tsx watch src/index.ts` | Start the API server with hot reload |
-| `npm run db:generate` | `prisma generate` | Generate Prisma Client |
-| `npm run db:migrate` | `prisma migrate dev` | Apply migrations in development |
-| `npm run db:seed` | `prisma db seed` | Populate database with sample data |
+
+| Script                | Command                  | Description                          |
+| --------------------- | ------------------------ | ------------------------------------ |
+| `npm start`           | `tsx src/index.ts`       | Start the API server                 |
+| `npm run dev`         | `tsx watch src/index.ts` | Start the API server with hot reload |
+| `npm run db:generate` | `prisma generate`        | Generate Prisma Client               |
+| `npm run db:migrate`  | `prisma migrate dev`     | Apply migrations in development      |
+| `npm run db:seed`     | `prisma db seed`         | Populate database with sample data   |
+
 
 ## Project structure
 
@@ -460,13 +655,13 @@ Login and logout in `auth.service.ts` already use this pattern (`LOGIN` and `LOG
 ├── src/
 │   ├── index.ts            # Server entry point (loads env, starts listener)
 │   ├── app.ts              # Express app, routes, global error middleware
-│   ├── audit/
-│   │   └── entity-types.ts # AuditEntityType constants for audit_logs.entityType
 │   ├── auth/
 │   │   ├── tokens.ts       # JWT signing, refresh token generation
 │   │   └── types.ts        # Auth-related TypeScript types
 │   ├── config/
 │   │   └── env.ts          # Environment variable parsing
+│   ├── constants/
+│   │   └── entity-types.ts # AuditEntityType constants for audit_logs.entityType
 │   ├── errors/
 │   │   ├── app-error.ts    # Base AppError class
 │   │   ├── http-errors.ts  # HTTP-specific error subclasses
@@ -481,49 +676,32 @@ Login and logout in `auth.service.ts` already use this pattern (`LOGIN` and `LOG
 │   │   ├── database.ts     # Database health checks
 │   │   └── audit.ts        # withAuditedTransaction / logAudit helpers
 │   ├── middleware/
-│   │   ├── auth_middleware.ts # Bearer JWT authentication
-│   │   └── validate-body.ts # Zod request body validation
-│   ├── routes/
-│   │   └── auth.routes.ts  # Login, refresh, logout, me
+│   │   ├── auth_middleware.ts  # Bearer JWT authentication
+│   │   └── validate-request.ts # Zod validation; stores output on req.validated
 │   ├── schemas/
-│   │   └── auth.schemas.ts # Zod schemas for auth request bodies
+│   │   ├── requests/           # Zod schemas for API inputs (body, query, params)
+│   │   │   ├── auth.requests.ts
+│   │   │   ├── experience.requests.ts
+│   │   │   └── shared.requests.ts
+│   │   └── responses/          # TypeScript types and Zod schemas for API outputs
+│   │       ├── experience.responses.ts
+│   │       ├── pagination.responses.ts
+│   │       └── pricing.responses.ts  # PricingPreview types + rule config schemas
+│   ├── routes/
+│   │   ├── auth.routes.ts        # Login, refresh, logout, me
+│   │   └── experiences.routes.ts # Experience search and detail
 │   ├── services/
-│   │   └── auth.service.ts # Auth business logic
+│   │   ├── auth.service.ts       # Auth business logic
+│   │   ├── experience.service.ts # Experience search and detail (DB-first availability)
+│   │   └── pricing.service.ts    # Real-time pricing preview from rule configs
 │   ├── types/
-│   │   └── express.d.ts    # Express Request augmentation (req.user)
+│   │   └── express.d.ts    # Express Request augmentation (req.user, req.validated)
+│   ├── utils/
+│   │   └── utils.ts        # Shared date parsing helpers
 │   └── generated/prisma/   # Generated client (not committed)
 ├── .env.example            # Environment template
 └── .env                    # Local secrets (not committed)
 ```
-
-## Troubleshooting
-
-### `EBADENGINE` / Prisma refuses to install
-
-Your Node.js version is too old. Upgrade to **20.19+**, **22.12+**, or **24+**.
-
-### `P1000: Authentication failed`
-
-Usually one of:
-
-1. **Wrong port** — ensure `DATABASE_URL` uses port `5433` (Docker mapping), not `5432`.
-2. **Docker not running** — run `docker compose up -d postgres`.
-3. **Stale shell variable** — if you previously exported `DATABASE_URL` in your terminal, clear it:
-   ```powershell
-   Remove-Item Env:DATABASE_URL -ErrorAction SilentlyContinue
-   ```
-
-### Database name shows `${POSTGRES_DB}` or `%7B...%7D`
-
-`DATABASE_URL` contains unexpanded variables. Use the literal connection string from `.env.example`.
-
-### `/health` returns 503 with `SERVICE_UNAVAILABLE`
-
-The API server is running but cannot reach Postgres. The response will include `"details": { "database": "disconnected" }`. Check that Docker is up, `DATABASE_URL` is correct, and port `5433` is reachable.
-
-### `npx` cleanup `EPERM` warnings on Windows
-
-Harmless npm cache cleanup warnings. Run `npm install` locally and use `npx prisma` from `node_modules` instead of relying on the global npx cache.
 
 ## Stopping services
 
@@ -536,3 +714,4 @@ To remove volumes (deletes all database data):
 ```bash
 docker compose down -v
 ```
+
