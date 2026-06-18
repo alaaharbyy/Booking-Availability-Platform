@@ -11,7 +11,7 @@ export type AuditContext = {
   metadata?: Prisma.InputJsonValue;
 };
 
-async function logAudit(
+export async function logAudit(
   tx: Prisma.TransactionClient,
   audit: AuditContext,
 ): Promise<void> {

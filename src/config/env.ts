@@ -48,6 +48,7 @@ const bookingReserveTtl = process.env.BOOKING_RESERVE_TTL ?? "15m";
 export const env = {
   port: optionalInt("PORT", 3000),
   databaseUrl: requireEnv("DATABASE_URL"),
+  redisUrl: process.env.REDIS_URL ?? "redis://localhost:6379",
   jwtAccessSecret: requireEnv("JWT_ACCESS_SECRET"),
   jwtRefreshSecret: process.env.JWT_REFRESH_SECRET ?? requireEnv("JWT_ACCESS_SECRET"),
   jwtAccessExpiresIn,
@@ -55,4 +56,5 @@ export const env = {
   jwtAccessExpiresInSeconds: parseDurationToSeconds(jwtAccessExpiresIn),
   jwtRefreshExpiresInSeconds: parseDurationToSeconds(jwtRefreshExpiresIn),
   bookingReserveTtlSeconds: parseDurationToSeconds(bookingReserveTtl),
+  bookingExpiryPollIntervalMs: optionalInt("BOOKING_EXPIRY_POLL_INTERVAL_MS", 60_000),
 } as const;

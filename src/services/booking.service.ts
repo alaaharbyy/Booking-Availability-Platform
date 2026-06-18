@@ -6,7 +6,7 @@ import {
 import { AuditEntityType } from "../constants/entity-types.js";
 import { env } from "../config/env.js";
 import { ConflictError, NotFoundError } from "../errors/index.js";
-import { withAuditedTransaction } from "../lib/audit.js";
+import { withAuditedTransaction, logAudit } from "../lib/audit.js";
 import { prisma } from "../lib/prisma.js";
 import type {
   BookingDetailResult,
@@ -336,4 +336,103 @@ export async function cancelReservation(
   );
 
   return toBookingSummary(updated);
+}
+
+const EXPIRY_BATCH_SIZE = 50;
+
+async function expireReservation(booking: {
+  id: string;
+  tenantId: string;
+  slotId: string;
+  partySize: number;
+  reference: string;
+}): Promise<boolean> {
+  return prisma.$transaction(async (tx) => {
+    const claimed = await tx.booking.updateMany({
+      where: {
+        id: booking.id,
+        status: BookingStatus.RESERVED,
+        reservedUntil: { lt: new Date() },
+      },
+      data: { status: BookingStatus.EXPIRED, reservedUntil: null },
+    });
+
+    if (claimed.count === 0) {
+      return false;
+    }
+
+    const slot = await tx.availabilitySlot.findFirst({
+      where: { id: booking.slotId, tenantId: booking.tenantId },
+      select: { version: true },
+    });
+
+    if (!slot) {
+      throw new ConflictError("Slot not found while expiring reservation");
+    }
+
+    await adjustSlotReserved(
+      tx,
+      booking.slotId,
+      booking.tenantId,
+      -booking.partySize,
+      slot.version,
+    );
+
+    await appendStatusHistory(
+      tx,
+      booking.id,
+      BookingStatus.RESERVED,
+      BookingStatus.EXPIRED,
+      null,
+      "Reservation hold expired",
+    );
+
+    await logAudit(tx, {
+      eventType: AuditEventType.BOOKING_EXPIRED,
+      tenantId: booking.tenantId,
+      actorUserId: null,
+      entityType: AuditEntityType.Booking,
+      entityId: booking.id,
+      metadata: {
+        booking_ref: booking.reference,
+        previousStatus: BookingStatus.RESERVED,
+      },
+    });
+
+    return true;
+  });
+}
+
+/** Marks overdue RESERVED bookings as EXPIRED and releases slot capacity. */
+export async function expireStaleReservations(): Promise<number> {
+  const stale = await prisma.booking.findMany({
+    where: {
+      status: BookingStatus.RESERVED,
+      reservedUntil: { lt: new Date() },
+    },
+    select: {
+      id: true,
+      tenantId: true,
+      slotId: true,
+      partySize: true,
+      reference: true,
+    },
+    take: EXPIRY_BATCH_SIZE,
+    orderBy: { reservedUntil: "asc" },
+  });
+
+  let expired = 0;
+
+  for (const booking of stale) {
+    try {
+      const didExpire = await expireReservation(booking);
+      if (didExpire) {
+        expired++;
+      }
+    } catch {
+      // Version conflict or concurrent cancel/confirm — retry on next poll.
+    }
+  }
+
+  return expired;
 }
