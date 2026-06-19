@@ -5,6 +5,7 @@ import express, {
 } from "express";
 import { asyncHandler, sendError, sendSuccess } from "./http/index.js";
 import { assertDatabaseHealthy } from "./lib/database.js";
+import { requestLogger } from "./middleware/request-logger.js";
 import { adminRouter } from "./routes/admin.routes.js";
 import { authRouter } from "./routes/auth.routes.js";
 import { bookingsRouter } from "./routes/bookings.routes.js";
@@ -14,6 +15,7 @@ import { webhooksRouter } from "./routes/webhooks.routes.js";
 export const app = express();
 
 app.use(express.json());
+app.use(requestLogger);
 
 app.get(
   "/health",

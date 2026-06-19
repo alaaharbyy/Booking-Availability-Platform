@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { env } from "../config/env.js";
+import { logger } from "./logger.js";
 import { getRedisCacheClient } from "./redis-cache.js";
 
 const PREFIX = "avail";
@@ -81,6 +82,7 @@ export async function invalidateTenantAvailability(
   const redis = getRedisCacheClient();
   const pattern = `${PREFIX}:${tenantId}:*`;
   let cursor = "0";
+  let deletedKeys = 0;
 
   do {
     const [nextCursor, keys] = await redis.scan(
@@ -94,15 +96,15 @@ export async function invalidateTenantAvailability(
 
     if (keys.length > 0) {
       await redis.del(...keys);
+      deletedKeys += keys.length;
     }
   } while (cursor !== "0");
+
+  logger.info("Availability cache invalidated", { tenantId, deletedKeys });
 }
 
 export function enqueueAvailabilityInvalidation(tenantId: string): void {
   void invalidateTenantAvailability(tenantId).catch((err) => {
-    console.error(
-      `Availability cache invalidation failed for tenant ${tenantId}:`,
-      err,
-    );
+    logger.error("Availability cache invalidation failed", { tenantId }, err);
   });
 }

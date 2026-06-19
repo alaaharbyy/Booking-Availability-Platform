@@ -3,6 +3,7 @@ import { AuditEntityType } from "../constants/entity-types.js";
 import { AuditEventType } from "../generated/prisma/client.js";
 import { NotFoundError } from "../errors/index.js";
 import { withAuditedTransaction } from "../lib/audit.js";
+import { logger } from "../lib/logger.js";
 import { prisma } from "../lib/prisma.js";
 import type {
   RegisterWebhookBody,
@@ -70,6 +71,7 @@ export async function registerWebhook(
       },
     );
 
+    logger.info("Webhook updated", { tenantId, url: body.url });
     return toRegistrationResult(updated, false);
   }
 
@@ -93,6 +95,7 @@ export async function registerWebhook(
     }),
   );
 
+  logger.info("Webhook created", { tenantId, url: body.url });
   return toRegistrationResult(created, true);
 }
 
@@ -118,5 +121,22 @@ export async function sendTestWebhook(
       },
   };
 
-  return deliverWebhook(webhook, payload, randomUUID());
+  const result = await deliverWebhook(webhook, payload, randomUUID());
+
+  if (result.delivered) {
+    logger.info("Test webhook delivered", {
+      tenantId,
+      statusCode: result.status_code,
+      durationMs: result.duration_ms,
+    });
+  } else {
+    logger.warn("Test webhook delivery failed", {
+      tenantId,
+      statusCode: result.status_code,
+      error: result.error,
+      durationMs: result.duration_ms,
+    });
+  }
+
+  return result;
 }

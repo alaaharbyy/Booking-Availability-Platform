@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { WebhookEventType } from "../constants/webhook-events.js";
+import { logger } from "../lib/logger.js";
 import { prisma } from "../lib/prisma.js";
 import { deliverWebhook } from "./webhook-delivery.service.js";
 
@@ -13,6 +14,11 @@ export async function dispatchBookingWebhook(
   });
 
   if (!webhook) {
+    logger.debug("Skipping booking webhook — no active webhook registered", {
+      tenantId,
+      event,
+      bookingId,
+    });
     return;
   }
 
@@ -26,6 +32,11 @@ export async function dispatchBookingWebhook(
   });
 
   if (!booking) {
+    logger.warn("Skipping booking webhook — booking not found", {
+      tenantId,
+      event,
+      bookingId,
+    });
     return;
   }
 
@@ -52,11 +63,24 @@ export async function dispatchBookingWebhook(
   const result = await deliverWebhook(webhook, payload, randomUUID());
 
   if (!result.delivered) {
-    console.error(
-      `Booking webhook ${event} failed for ${booking.reference}:`,
-      result.error ?? result.status_code,
-    );
+    logger.warn("Booking webhook delivery failed", {
+      tenantId,
+      event,
+      bookingRef: booking.reference,
+      statusCode: result.status_code,
+      error: result.error,
+      durationMs: result.duration_ms,
+    });
+    return;
   }
+
+  logger.info("Booking webhook delivered", {
+    tenantId,
+    event,
+    bookingRef: booking.reference,
+    statusCode: result.status_code,
+    durationMs: result.duration_ms,
+  });
 }
 
 export function enqueueBookingWebhook(
@@ -65,6 +89,6 @@ export function enqueueBookingWebhook(
   bookingId: string,
 ): void {
   void dispatchBookingWebhook(tenantId, event, bookingId).catch((err) => {
-    console.error(`Booking webhook ${event} error:`, err);
+    logger.error("Booking webhook dispatch error", { tenantId, event, bookingId }, err);
   });
 }

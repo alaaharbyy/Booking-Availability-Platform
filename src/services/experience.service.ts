@@ -7,6 +7,7 @@ import {
   setCachedDetail,
   setCachedSearch,
 } from "../lib/availability-cache.js";
+import { logger } from "../lib/logger.js";
 import { prisma } from "../lib/prisma.js";
 import type {
   ExperienceDetailResult,
@@ -74,8 +75,11 @@ export async function searchExperiences(
 ): Promise<ExperienceSearchResult> {
   const cached = await getCachedSearch<ExperienceSearchResult>(tenantId, query);
   if (cached) {
+    logger.debug("Availability cache hit", { tenantId, type: "search" });
     return cached;
   }
+
+  logger.debug("Availability cache miss", { tenantId, type: "search" });
 
   const startAt = parseUtcDate(query.start_date);
   const endAt = endDateExclusive(query.end_date);
@@ -100,7 +104,7 @@ export async function searchExperiences(
       },
     };
     void setCachedSearch(tenantId, query, emptyResult).catch((err) => {
-      console.error("Failed to cache experience search result:", err);
+      logger.warn("Failed to cache experience search result", { tenantId }, err);
     });
     return emptyResult;
   }
@@ -268,7 +272,7 @@ export async function searchExperiences(
   };
 
   void setCachedSearch(tenantId, query, result).catch((err) => {
-    console.error("Failed to cache experience search result:", err);
+    logger.warn("Failed to cache experience search result", { tenantId }, err);
   });
 
   return result;
@@ -285,8 +289,19 @@ export async function getExperienceDetail(
     query,
   );
   if (cached) {
+    logger.debug("Availability cache hit", {
+      tenantId,
+      type: "detail",
+      experienceId,
+    });
     return cached;
   }
+
+  logger.debug("Availability cache miss", {
+    tenantId,
+    type: "detail",
+    experienceId,
+  });
 
   const experience = await prisma.experience.findFirst({
     where: {
@@ -390,7 +405,10 @@ export async function getExperienceDetail(
   };
 
   void setCachedDetail(tenantId, experienceId, query, result).catch((err) => {
-    console.error("Failed to cache experience detail result:", err);
+    logger.warn("Failed to cache experience detail result", {
+      tenantId,
+      experienceId,
+    }, err);
   });
 
   return result;

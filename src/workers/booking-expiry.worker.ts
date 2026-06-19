@@ -1,4 +1,5 @@
 import { Worker } from "bullmq";
+import { logger } from "../lib/logger.js";
 import { expireStaleReservations } from "../services/booking.service.js";
 import {
   BOOKING_EXPIRY_QUEUE,
@@ -22,14 +23,16 @@ export function startBookingExpiryWorker(): Worker {
 
       const count = await expireStaleReservations();
       if (count > 0) {
-        console.log(`Expired ${count} stale reservation(s)`);
+        logger.info("Expired stale reservations", { count });
+      } else {
+        logger.debug("Booking expiry job completed", { expired: 0 });
       }
     },
     { connection: redisConnection },
   );
 
   worker.on("failed", (job, err) => {
-    console.error(`Booking expiry job ${job?.id} failed:`, err);
+    logger.error("Booking expiry job failed", { jobId: job?.id, jobName: job?.name }, err);
   });
 
   return worker;
