@@ -5,6 +5,7 @@ import express, {
 } from "express";
 import { asyncHandler, sendError, sendSuccess } from "./http/index.js";
 import { assertDatabaseHealthy } from "./lib/database.js";
+import { adminRouter } from "./routes/admin.routes.js";
 import { authRouter } from "./routes/auth.routes.js";
 import { bookingsRouter } from "./routes/bookings.routes.js";
 import { experiencesRouter } from "./routes/experiences.routes.js";
@@ -21,6 +22,7 @@ app.get(
   }),
 );
 
+app.use("/admin", adminRouter);
 app.use("/auth", authRouter);
 app.use("/bookings", bookingsRouter);
 app.use("/experiences", experiencesRouter);

@@ -23,6 +23,11 @@ Multi-tenant travel booking platform with availability management, pricing rules
 - **Auth middleware** (`src/middleware/auth_middleware.ts`) — validates `Authorization: Bearer <token>` and attaches the user to `req.user`
 - **Request validation** (`src/schemas/requests/`, `src/middleware/validate-request.ts`) — Zod schemas for incoming body, query, and route params; parsed values are stored on `req.validated` (required for Express 5, where `req.query` and `req.params` are read-only)
 - **Experience search & pricing** (`GET /experiences`, `GET /experiences/:id`) — tenant-scoped search by destination, date range, party size, and price range; availability filtering, grouping, sorting, and pagination run in PostgreSQL; pricing previews are computed in application code from supplier pricing rules (group size, advance booking, seasonal) with Zod-validated JSONB rule configs
+- **Bookings** (`src/routes/bookings.routes.ts`, `src/services/booking.service.ts`) — reserve, confirm, cancel, and retrieve bookings with optimistic concurrency on slot capacity (`version` column); status lifecycle enforced via `booking-state.ts`; reservations expire after `BOOKING_RESERVE_TTL` (default 15 minutes)
+- **Booking expiry worker** (`src/workers/booking-expiry.worker.ts`, `src/queues/booking-expiry.queue.ts`) — BullMQ repeatable job on Redis marks overdue `RESERVED` bookings as `EXPIRED` and releases slot capacity; started automatically with the API server
+- **Role middleware** (`src/middleware/require-role.ts`) — `requireRole(...)` returns `403 Forbidden` when the authenticated user's role is not allowed
+- **Admin API** (`src/routes/admin.routes.ts`) — tenant-scoped booking list (`GET /admin/bookings`, `ADMIN` + `TRAVEL_MANAGER`) and paginated audit trail (`GET /admin/audit-log`, `ADMIN` only)
+- **Multi-tenant isolation** — authenticated resource access always scopes queries by `req.user.tenantId` from the JWT; cross-tenant ID access returns `404 Not Found`
 
 ## Prerequisites
 
@@ -71,6 +76,8 @@ Install all dependencies with `npm install`. These are the packages this project
 | `bcryptjs`           | `^3.0.3`  | Password hashing (seed data and login verification)   |
 | `express`            | `^5.1.0`  | HTTP server                                           |
 | `jsonwebtoken`       | `^9.0.3`  | JWT access and refresh token signing                  |
+| `bullmq`             | `^5.79.0` | Repeatable job scheduler for booking expiry           |
+| `ioredis`            | `^5.11.1` | Redis client for BullMQ                               |
 | `zod`                | `^4.4.3`  | Request schema validation                             |
 
 
@@ -114,12 +121,16 @@ POSTGRES_DB=booking-availability-platform
 POSTGRES_USER=postgres
 POSTGRES_PASSWORD=postgres
 DATABASE_URL="postgresql://postgres:postgres@localhost:5433/booking-availability-platform"
+REDIS_URL=redis://localhost:6379
 PORT=3000
 
 JWT_ACCESS_SECRET=change-me-in-production-use-a-long-random-string
 JWT_REFRESH_SECRET=change-me-refresh-secret-in-production
 JWT_ACCESS_EXPIRES_IN=15m
 JWT_REFRESH_EXPIRES_IN=30d
+
+BOOKING_RESERVE_TTL=15m
+BOOKING_EXPIRY_POLL_INTERVAL_MS=60000
 ```
 
 **Important:**
@@ -127,8 +138,9 @@ JWT_REFRESH_EXPIRES_IN=30d
 - Use a **full connection string** in `DATABASE_URL`. Unlike Docker Compose, `.env` files do **not** expand `${POSTGRES_USER}`-style references.
 - Set strong, unique values for `JWT_ACCESS_SECRET` and `JWT_REFRESH_SECRET` in production.
 - Postgres is mapped to host port **5433** (not 5432) to avoid conflicts with a local PostgreSQL installation. If you have no other Postgres running, you can change the compose port mapping to `5432:5432` and update `DATABASE_URL` accordingly.
+- Redis must be running before starting the API server — the booking expiry worker connects on startup.
 
-### 3. Start the database
+### 3. Start Postgres and Redis
 
 ```bash
 docker compose up -d
@@ -167,10 +179,12 @@ The seed script **clears all existing data** and repopulates the tables.
 ### 7. Start the API server
 
 ```bash
-npm start        # start the server
+npm start        # start the server and booking expiry worker
 # or
 npm run dev      # start with hot reload
 ```
+
+On startup the server registers a BullMQ repeatable job that polls for expired reservations every `BOOKING_EXPIRY_POLL_INTERVAL_MS` (default 60 seconds).
 
 Verify the app is working:
 
@@ -179,6 +193,26 @@ curl http://localhost:3000/health
 ```
 
 ## API
+
+### Endpoints
+
+
+| Method   | Path                          | Auth     | Roles                          | Description                    |
+| -------- | ----------------------------- | -------- | ------------------------------ | ------------------------------ |
+| `GET`    | `/health`                     | No       | —                              | Server and database health     |
+| `POST`   | `/auth/login`                 | No       | —                              | Sign in                        |
+| `POST`   | `/auth/refresh`               | No       | —                              | Rotate tokens                  |
+| `POST`   | `/auth/logout`                | No       | —                              | Revoke refresh token           |
+| `GET`    | `/auth/me`                    | Bearer   | Any                            | Current user                   |
+| `GET`    | `/experiences`                | Bearer   | Any                            | Search experiences             |
+| `GET`    | `/experiences/:id`            | Bearer   | Any                            | Experience detail + slots      |
+| `POST`   | `/bookings`                   | Bearer   | Any                            | Create reservation             |
+| `GET`    | `/bookings/:ref`              | Bearer   | Any (own booking)              | Booking detail                 |
+| `PATCH`  | `/bookings/:ref/confirm`      | Bearer   | Any (own booking)              | Confirm reservation            |
+| `DELETE` | `/bookings/:ref`              | Bearer   | Any (own booking)              | Cancel booking                 |
+| `GET`    | `/admin/bookings`             | Bearer   | `ADMIN`, `TRAVEL_MANAGER`      | Tenant booking list            |
+| `GET`    | `/admin/audit-log`            | Bearer   | `ADMIN`                        | Tenant audit trail             |
+
 
 All endpoints return a consistent envelope:
 
@@ -311,9 +345,21 @@ Health check — confirms the server is running and the database is reachable.
 }
 ```
 
+### Authorization
+
+Protected routes require an `Authorization: Bearer <accessToken>` header. The auth middleware validates the JWT, reloads the user from the database, and attaches `req.user` (`id`, `tenantId`, `email`, `role`).
+
+| Role             | Description                                      |
+| ---------------- | ------------------------------------------------ |
+| `ADMIN`          | Full tenant access, including audit log          |
+| `TRAVEL_MANAGER` | Tenant booking list; no audit log access         |
+| `VIEWER`         | Read-only access to experiences and own bookings |
+
+Admin routes use `requireRole` middleware. All tenant-scoped resource queries filter by `req.user.tenantId` — never accept a tenant ID from the client.
+
 ### Authentication
 
-All auth routes are mounted under `/auth`. Protected routes require an `Authorization: Bearer <accessToken>` header.
+All auth routes are mounted under `/auth`.
 
 #### `POST /auth/login`
 
@@ -569,7 +615,255 @@ curl -s "http://localhost:3000/experiences/<experience-id>?party_size=6&start_da
   -H "Authorization: Bearer TOKEN"
 ```
 
-### Audit logging
+### Bookings
+
+All booking routes are mounted under `/bookings` and require a valid access token. Individual booking access is scoped to the authenticated user **and** tenant (`tenantId` + `userId` + `reference`). Cross-tenant or other-user access returns **404 Not Found**.
+
+Booking status lifecycle:
+
+```
+RESERVED → CONFIRMED | CANCELLED | EXPIRED
+CONFIRMED → CANCELLED
+CANCELLED → (terminal)
+EXPIRED → (terminal)
+```
+
+New reservations start in `RESERVED` with a hold until `reserved_until` (default: 15 minutes from creation, configurable via `BOOKING_RESERVE_TTL`). Overdue holds are marked `EXPIRED` by the background worker and slot capacity is released.
+
+#### `POST /bookings`
+
+Create a reservation for a slot. Atomically increments `slot.reserved` with optimistic locking on `slot.version`.
+
+**Request body**
+
+```json
+{
+  "slot_id": "<availability-slot-uuid>",
+  "party_size": 4
+}
+```
+
+**201 Created**
+
+```json
+{
+  "success": true,
+  "data": {
+    "booking_ref": "BK-A1B2C3D4",
+    "status": "RESERVED",
+    "party_size": 4,
+    "total_price": "756.00",
+    "reserved_until": "2026-06-17T07:31:41.975Z"
+  },
+  "meta": { "timestamp": "2026-06-17T07:16:41.975Z" }
+}
+```
+
+**409 Conflict** — slot no longer has capacity or version mismatch.
+
+#### `GET /bookings/:ref`
+
+Returns booking summary, experience, slot, and status timeline for the authenticated user's booking.
+
+**200 OK**
+
+```json
+{
+  "success": true,
+  "data": {
+    "booking_ref": "BK-A1B2C3D4",
+    "status": "RESERVED",
+    "party_size": 4,
+    "total_price": "756.00",
+    "reserved_until": "2026-06-17T07:31:41.975Z",
+    "experience": { "id": "...", "title": "Glacier Hike & Ice Caves" },
+    "slot": {
+      "id": "...",
+      "starts_at": "2026-06-24T08:00:00.000Z",
+      "ends_at": "2026-06-24T13:00:00.000Z"
+    },
+    "timeline": [
+      {
+        "from_status": null,
+        "to_status": "RESERVED",
+        "reason": null,
+        "actor_user_id": "...",
+        "at": "2026-06-17T07:16:41.975Z"
+      }
+    ]
+  },
+  "meta": { "timestamp": "2026-06-17T07:16:41.975Z" }
+}
+```
+
+#### `PATCH /bookings/:ref/confirm`
+
+Confirm a `RESERVED` booking before `reserved_until` expires.
+
+**200 OK** — returns updated `BookingSummary` with `status: "CONFIRMED"` and `reserved_until: null`.
+
+**409 Conflict** — hold expired, invalid status transition, or slot conflict.
+
+#### `DELETE /bookings/:ref`
+
+Cancel a `RESERVED` or `CONFIRMED` booking. Releases slot capacity.
+
+**Request body**
+
+```json
+{
+  "reason": "Customer requested cancellation"
+}
+```
+
+**200 OK** — returns updated `BookingSummary` with `status: "CANCELLED"`.
+
+**Examples**
+
+```bash
+# Create a reservation
+curl -s -X POST http://localhost:3000/bookings \
+  -H "Authorization: Bearer TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"slot_id":"<slot-id>","party_size":4}'
+
+# Confirm
+curl -s -X PATCH http://localhost:3000/bookings/BK-A1B2C3D4/confirm \
+  -H "Authorization: Bearer TOKEN"
+
+# Cancel
+curl -s -X DELETE http://localhost:3000/bookings/BK-A1B2C3D4 \
+  -H "Authorization: Bearer TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"reason":"Changed plans"}'
+```
+
+### Admin
+
+Admin routes are mounted under `/admin`. All queries are tenant-scoped via `req.user.tenantId`.
+
+#### `GET /admin/bookings`
+
+Paginated list of all bookings for the authenticated user's tenant. Requires `ADMIN` or `TRAVEL_MANAGER`.
+
+**Query parameters**
+
+
+| Parameter        | Required | Default      | Description                                              |
+| ---------------- | -------- | ------------ | -------------------------------------------------------- |
+| `status`         | No       | —            | `RESERVED`, `CONFIRMED`, `CANCELLED`, or `EXPIRED`        |
+| `user_id`        | No       | —            | Filter by booking owner UUID                             |
+| `experience_id`  | No       | —            | Filter by experience UUID                                |
+| `reference`      | No       | —            | Exact booking reference match                            |
+| `created_from`   | No       | —            | Booking created on or after (`YYYY-MM-DD`)               |
+| `created_to`     | No       | —            | Booking created on or before (`YYYY-MM-DD`, inclusive)   |
+| `slot_from`      | No       | —            | Slot starts on or after (`YYYY-MM-DD`)                   |
+| `slot_to`        | No       | —            | Slot starts on or before (`YYYY-MM-DD`, inclusive)       |
+| `sort_by`        | No       | `created_at` | `created_at`, `status`, `total_price`, `slot_starts_at`  |
+| `sort_order`     | No       | `desc`       | `asc` or `desc`                                          |
+| `page`           | No       | `1`          | Page number                                              |
+| `page_size`      | No       | `20`         | Results per page (max `100`)                             |
+
+
+**200 OK**
+
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "booking_ref": "BK-A1B2C3D4",
+        "status": "CONFIRMED",
+        "party_size": 4,
+        "total_price": "756.00",
+        "reserved_until": null,
+        "created_at": "2026-06-17T07:16:41.975Z",
+        "user": { "id": "...", "email": "admin@summit-adventures.com" },
+        "experience": { "id": "...", "title": "Glacier Hike & Ice Caves" },
+        "slot": {
+          "id": "...",
+          "starts_at": "2026-06-24T08:00:00.000Z",
+          "ends_at": "2026-06-24T13:00:00.000Z"
+        }
+      }
+    ],
+    "pagination": {
+      "page": 1,
+      "pageSize": 20,
+      "totalItems": 1,
+      "totalPages": 1
+    }
+  },
+  "meta": { "timestamp": "2026-06-17T07:16:41.975Z" }
+}
+```
+
+**403 Forbidden** — caller is `VIEWER`.
+
+#### `GET /admin/audit-log`
+
+Paginated audit trail for the authenticated user's tenant. Requires `ADMIN`.
+
+**Query parameters**
+
+
+| Parameter       | Required | Default | Description                                           |
+| --------------- | -------- | ------- | ----------------------------------------------------- |
+| `event_type`    | No       | —       | `AuditEventType` enum value (e.g. `BOOKING_CONFIRMED`) |
+| `entity_type`   | No       | —       | Entity type string (e.g. `Booking`, `User`)           |
+| `entity_id`     | No       | —       | Entity UUID                                           |
+| `actor_user_id` | No       | —       | Actor user UUID                                       |
+| `from`          | No       | —       | Event on or after (`YYYY-MM-DD`)                      |
+| `to`            | No       | —       | Event on or before (`YYYY-MM-DD`, inclusive)          |
+| `sort_order`    | No       | `desc`  | Sort by `created_at`                                  |
+| `page`          | No       | `1`     | Page number                                           |
+| `page_size`     | No       | `20`    | Results per page (max `100`)                          |
+
+
+**200 OK**
+
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "id": "...",
+        "event_type": "BOOKING_CONFIRMED",
+        "entity_type": "Booking",
+        "entity_id": "...",
+        "actor": { "id": "...", "email": "manager@summit-adventures.com" },
+        "metadata": { "booking_ref": "BK-A1B2C3D4", "previousStatus": "RESERVED" },
+        "created_at": "2026-06-17T07:16:41.975Z"
+      }
+    ],
+    "pagination": {
+      "page": 1,
+      "pageSize": 20,
+      "totalItems": 1,
+      "totalPages": 1
+    }
+  },
+  "meta": { "timestamp": "2026-06-17T07:16:41.975Z" }
+}
+```
+
+**403 Forbidden** — caller is not `ADMIN`.
+
+**Examples**
+
+```bash
+# List confirmed bookings for the tenant
+curl -s "http://localhost:3000/admin/bookings?status=CONFIRMED&page=1" \
+  -H "Authorization: Bearer TOKEN"
+
+# Audit log for booking events
+curl -s "http://localhost:3000/admin/audit-log?event_type=BOOKING_CONFIRMED&page=1" \
+  -H "Authorization: Bearer TOKEN"
+```
+
+### Audit logging (developer guide)
 
 Mutating operations that should leave an audit trail use `withAuditedTransaction` from `src/lib/audit.ts`. The helper runs your callback inside a Prisma interactive transaction, then inserts a row into `audit_logs` using the same transactional client so both succeed or both roll back.
 
@@ -598,6 +892,12 @@ import { AuditEntityType } from "../constants/entity-types.js";
 import { withAuditedTransaction } from "../lib/audit.js";
 
 await withAuditedTransaction(
+  async (tx) => {
+    return tx.booking.update({
+      where: { id: bookingId },
+      data: { status: "CONFIRMED" },
+    });
+  },
   {
     eventType: AuditEventType.BOOKING_CONFIRMED,
     tenantId,
@@ -606,18 +906,12 @@ await withAuditedTransaction(
     entityId: bookingId,
     metadata: { previousStatus: "RESERVED" },
   },
-  async (tx) => {
-    return tx.booking.update({
-      where: { id: bookingId },
-      data: { status: "CONFIRMED" },
-    });
-  },
 );
 ```
 
 If you already have an open transaction callback, call `logAudit(tx, auditContext)` at the end instead. Inside any transaction, use only the `tx` client — not the global `prisma` instance — so all writes stay in the same transaction.
 
-Login and logout in `auth.service.ts` already use this pattern (`LOGIN` and `LOGOUT` events on the `User` entity).
+Login, logout, and booking mutations in `auth.service.ts` and `booking.service.ts` already use this pattern.
 
 ## Seed data
 
@@ -625,10 +919,12 @@ Login and logout in `auth.service.ts` already use this pattern (`LOGIN` and `LOG
 | Item                 | Details                                                                                      |
 | -------------------- | -------------------------------------------------------------------------------------------- |
 | Tenants              | Summit Adventures (`summit-adventures`), Coastal Escapes (`coastal-escapes`)                 |
-| Users                | 5 users across both tenants                                                                  |
+| Users                | 5 users across both tenants (see roles below)                                                |
 | Password (all users) | `Password123!`                                                                               |
-| Sample logins        | `admin@summit-adventures.com`, `manager@coastal-escapes.com`, `viewer@summit-adventures.com` |
+| Summit logins        | `admin@summit-adventures.com` (ADMIN), `manager@summit-adventures.com` (TRAVEL_MANAGER), `viewer@summit-adventures.com` (VIEWER) |
+| Coastal logins       | `admin@coastal-escapes.com` (ADMIN), `manager@coastal-escapes.com` (TRAVEL_MANAGER)          |
 | Bookings             | One each in CONFIRMED, RESERVED, CANCELLED, and EXPIRED status                               |
+| Audit logs           | Sample entries for `USER_CREATED`, `BOOKING_CONFIRMED`, `WEBHOOK_CREATED`, etc.              |
 
 
 ## npm scripts
@@ -653,7 +949,7 @@ Login and logout in `auth.service.ts` already use this pattern (`LOGIN` and `LOG
 │   ├── seed.ts             # Seed script
 │   └── migrations/         # SQL migrations
 ├── src/
-│   ├── index.ts            # Server entry point (loads env, starts listener)
+│   ├── index.ts            # Server entry point (loads env, starts listener + expiry worker)
 │   ├── app.ts              # Express app, routes, global error middleware
 │   ├── auth/
 │   │   ├── tokens.ts       # JWT signing, refresh token generation
@@ -673,31 +969,47 @@ Login and logout in `auth.service.ts` already use this pattern (`LOGIN` and `LOG
 │   │   └── index.ts        # Public exports (barrel)
 │   ├── lib/
 │   │   ├── prisma.ts       # Shared Prisma client
+│   │   ├── redis.ts        # Redis connection for BullMQ
 │   │   ├── database.ts     # Database health checks
 │   │   └── audit.ts        # withAuditedTransaction / logAudit helpers
 │   ├── middleware/
 │   │   ├── auth_middleware.ts  # Bearer JWT authentication
+│   │   ├── require-role.ts     # Role-based access control
 │   │   └── validate-request.ts # Zod validation; stores output on req.validated
+│   ├── queues/
+│   │   └── booking-expiry.queue.ts # BullMQ queue and repeatable scheduler
 │   ├── schemas/
 │   │   ├── requests/           # Zod schemas for API inputs (body, query, params)
+│   │   │   ├── admin.requests.ts
 │   │   │   ├── auth.requests.ts
+│   │   │   ├── booking.requests.ts
 │   │   │   ├── experience.requests.ts
 │   │   │   └── shared.requests.ts
-│   │   └── responses/          # TypeScript types and Zod schemas for API outputs
+│   │   └── responses/          # TypeScript types for API outputs
+│   │       ├── admin.responses.ts
+│   │       ├── booking.responses.ts
 │   │       ├── experience.responses.ts
 │   │       ├── pagination.responses.ts
 │   │       └── pricing.responses.ts  # PricingPreview types + rule config schemas
 │   ├── routes/
+│   │   ├── admin.routes.ts       # Tenant booking list and audit log
 │   │   ├── auth.routes.ts        # Login, refresh, logout, me
+│   │   ├── bookings.routes.ts    # Reserve, confirm, cancel, detail
 │   │   └── experiences.routes.ts # Experience search and detail
 │   ├── services/
-│   │   ├── auth.service.ts       # Auth business logic
-│   │   ├── experience.service.ts # Experience search and detail (DB-first availability)
-│   │   └── pricing.service.ts    # Real-time pricing preview from rule configs
+│   │   ├── admin-booking.service.ts # Tenant-scoped admin booking list
+│   │   ├── audit-log.service.ts     # Tenant-scoped audit log list
+│   │   ├── auth.service.ts          # Auth business logic
+│   │   ├── booking.service.ts       # Booking lifecycle and slot concurrency
+│   │   ├── booking-state.ts         # Allowed status transitions
+│   │   ├── experience.service.ts    # Experience search and detail (DB-first availability)
+│   │   └── pricing.service.ts       # Real-time pricing preview from rule configs
+│   ├── workers/
+│   │   └── booking-expiry.worker.ts # Expires stale RESERVED bookings
 │   ├── types/
 │   │   └── express.d.ts    # Express Request augmentation (req.user, req.validated)
 │   ├── utils/
-│   │   └── utils.ts        # Shared date parsing helpers
+│   │   └── utils.ts        # Shared date parsing and booking reference helpers
 │   └── generated/prisma/   # Generated client (not committed)
 ├── .env.example            # Environment template
 └── .env                    # Local secrets (not committed)
