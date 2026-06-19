@@ -1,27 +1,44 @@
 services:
+  app:
+    build: .
+    container_name: travel-booking-app
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-booking-availability-platform}
+      REDIS_URL: redis://redis:6379
+      PORT: 3000
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-change-me-in-production-use-a-long-random-string}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-change-me-refresh-secret-in-production}
+      JWT_ACCESS_EXPIRES_IN: ${JWT_ACCESS_EXPIRES_IN:-15m}
+      JWT_REFRESH_EXPIRES_IN: ${JWT_REFRESH_EXPIRES_IN:-30d}
+      BOOKING_RESERVE_TTL: ${BOOKING_RESERVE_TTL:-15m}
+      BOOKING_EXPIRY_POLL_INTERVAL_MS: ${BOOKING_EXPIRY_POLL_INTERVAL_MS:-60000}
+      AVAILABILITY_CACHE_TTL_SECONDS: ${AVAILABILITY_CACHE_TTL_SECONDS:-300}
+      SEED_ON_START: ${SEED_ON_START:-true}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
   postgres:
     image: postgres:18-alpine
-
     container_name: travel-booking-postgres
-
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-booking-availability-platform}
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-postgres}"
       POSTGRES_USER: "${POSTGRES_USER:-postgres}"
-
     ports:
       - "5433:5432"
-
     volumes:
       - postgres_data:/var/lib/postgresql
-  
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER}" ]
-      interval: 10s
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 5s
       timeout: 5s
-      retries: 5
-  
-  
+      retries: 10
+
   redis:
     image: redis:7-alpine
     container_name: travel-booking-redis
@@ -31,9 +48,9 @@ services:
       - redis_data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
+      interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
 
 volumes:
   postgres_data:

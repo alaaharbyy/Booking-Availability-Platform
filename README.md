@@ -15,31 +15,38 @@ Multi-tenant travel booking platform with availability management, pricing rules
 
 ## Prerequisites
 
-- **Node.js** 20.19.0+ (22 LTS recommended) — Prisma 7 requires this
-- **Docker Desktop** — Postgres 18 and Redis 7
-- **npm** 10+
+- **Docker Desktop** (recommended — runs everything with one command)
+- Or for local dev: **Node.js** 20.19.0+ (22 LTS recommended) and **npm** 10+
 
-## Quick start
+## Quick start (Docker)
 
 ```bash
 git clone https://github.com/alaaharbyy/Booking-Availability-Platform.git
 cd Booking-Availability-Platform
+docker compose up --build
+```
+
+API: http://localhost:3000
+
+Verify: `curl http://localhost:3000/health`
+
+On first start the app container runs migrations and seeds sample data (`SEED_ON_START=true` by default). Set `SEED_ON_START=false` in a `.env` file or your environment to skip re-seeding on later runs.
+
+Stop: `docker compose down` — add `-v` to delete database volumes.
+
+## Local development (API on host)
+
+```bash
 npm install
 cp .env.example .env
-docker compose up -d
+docker compose up -d postgres redis
 npm run db:generate
 npm run db:migrate
 npm run db:seed
 npm run dev
 ```
 
-Verify: `curl http://localhost:3000/health`
-
-**Notes**
-
-- Postgres runs on host port **5433** (see `DATABASE_URL` in `.env.example`)
-- Redis must be up before starting the server (booking expiry worker)
-- Seed clears and repopulates all data; password for all users: `Password123!`
+Use `DATABASE_URL` with `localhost:5433` and `REDIS_URL=redis://localhost:6379` (see `.env.example`).
 
 ## npm scripts
 
@@ -47,10 +54,13 @@ Verify: `curl http://localhost:3000/health`
 | ------ | ----------- |
 | `npm start` / `npm run dev` | Start API + expiry worker |
 | `npm run db:generate` | Generate Prisma client |
-| `npm run db:migrate` | Apply migrations |
+| `npm run db:migrate` | Apply migrations (interactive dev) |
+| `npm run db:deploy` | Apply migrations (non-interactive) |
 | `npm run db:seed` | Load sample data |
 
 ## Seed logins
+
+Password for all users: `Password123!`
 
 | Tenant | Email | Role |
 | ------ | ----- | ---- |
@@ -62,29 +72,27 @@ Verify: `curl http://localhost:3000/health`
 
 ## API
 
-All responses use `{ success, data, meta }` or `{ success, false, error, meta }`. Protected routes need `Authorization: Bearer <accessToken>`. Query/body validation via Zod → `req.validated`.
+All responses use `{ success, data, meta }` or `{ success, false, error, meta }`. Protected routes need `Authorization: Bearer <accessToken>`.
 
 ### Endpoints
 
 | Method | Path | Roles | Description |
 | ------ | ---- | ----- | ----------- |
 | `GET` | `/health` | — | Health check |
-| `POST` | `/auth/login` | — | Sign in (`tenantSlug`, `email`, `password`) |
+| `POST` | `/auth/login` | — | Sign in |
 | `POST` | `/auth/refresh` | — | Rotate tokens |
 | `POST` | `/auth/logout` | — | Revoke refresh token |
 | `GET` | `/auth/me` | Any | Current user |
-| `GET` | `/experiences` | Any | Search experiences (filters: `destination`, dates, `party_size`, `supplier_id`, price, sort, pagination) |
-| `GET` | `/experiences/:id` | Any | Detail + slot pricing (`party_size`, `slot_id`, date filters) |
-| `POST` | `/bookings` | Any | Reserve slot (`slot_id`, `party_size`) |
+| `GET` | `/experiences` | Any | Search experiences |
+| `GET` | `/experiences/:id` | Any | Experience detail + slots |
+| `POST` | `/bookings` | Any | Reserve slot |
 | `GET` | `/bookings/:ref` | Own | Booking detail |
 | `PATCH` | `/bookings/:ref/confirm` | Own | Confirm reservation |
-| `DELETE` | `/bookings/:ref` | Own | Cancel (`reason` in body) |
-| `GET` | `/admin/bookings` | ADMIN, TRAVEL_MANAGER | Tenant booking list (filters: `status`, `user_id`, `experience_id`, `reference`, date ranges, sort, pagination) |
-| `GET` | `/admin/audit-log` | ADMIN | Audit trail (filters: `event_type`, `entity_type`, `entity_id`, `actor_user_id`, dates, pagination) |
-| `POST` | `/webhooks` | ADMIN | Register/update webhook URL (upsert, rotates secret) |
-| `POST` | `/webhooks/test` | ADMIN | Send signed test event (optional `data` in body) |
-
-Own bookings are scoped to `tenantId` + `userId`. Cross-tenant access returns **404**.
+| `DELETE` | `/bookings/:ref` | Own | Cancel booking |
+| `GET` | `/admin/bookings` | ADMIN, TRAVEL_MANAGER | Tenant booking list |
+| `GET` | `/admin/audit-log` | ADMIN | Audit trail |
+| `POST` | `/webhooks` | ADMIN | Register webhook URL |
+| `POST` | `/webhooks/test` | ADMIN | Send test webhook |
 
 ### Auth example
 
@@ -94,57 +102,15 @@ curl -s -X POST http://localhost:3000/auth/login \
   -d '{"tenantSlug":"summit-adventures","email":"admin@summit-adventures.com","password":"Password123!"}'
 ```
 
-### Bookings
-
-Reservations hold for `BOOKING_RESERVE_TTL` (default 15m), then expire via background worker.
-
-Experience search/detail responses are cached in Redis (`AVAILABILITY_CACHE_TTL_SECONDS`, default 300s). Cache is cleared for the whole tenant when a booking reserves, cancels, or expires a slot.
-
-```bash
-curl -s -X POST http://localhost:3000/bookings \
-  -H "Authorization: Bearer TOKEN" -H "Content-Type: application/json" \
-  -d '{"slot_id":"<uuid>","party_size":4}'
-```
-
 ### Webhooks
 
-One webhook per tenant. Outbound requests include HMAC-SHA256 headers: `X-Webhook-Id`, `X-Webhook-Timestamp`, `X-Webhook-Signature` (`t=<ts>,v1=<hex>` over `${timestamp}.${rawBody}`).
-
-**Booking events** (sent automatically after reserve, confirm, cancel, or expiry): `booking.reserved`, `booking.confirmed`, `booking.cancelled`, `booking.expired`. Test events use `webhook.test`.
-
-**Testing:** Get a free URL at [Webhook.site](https://webhook.site/), register it, then create a booking or call `/webhooks/test`.
-
-```bash
-curl -s -X POST http://localhost:3000/webhooks \
-  -H "Authorization: Bearer TOKEN" -H "Content-Type: application/json" \
-  -d '{"url":"https://webhook.site/your-id"}'
-
-curl -s -X POST http://localhost:3000/webhooks/test \
-  -H "Authorization: Bearer TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"data":{"message":"Hello"}}'
-```
-
-Secret is returned only on register — store it securely.
+Register at [Webhook.site](https://webhook.site/) for testing. Booking events: `booking.reserved`, `booking.confirmed`, `booking.cancelled`, `booking.expired`.
 
 ## Project layout
 
 ```
-prisma/          schema, migrations, seed
-src/
-  routes/        HTTP route handlers
-  services/      Business logic
-  middleware/    auth, roles, validation
-  schemas/       Zod request + response types
-  workers/       BullMQ workers
-  lib/           prisma, redis, audit, webhook signing
-```
-
-Audit writes use `withAuditedTransaction` in `src/lib/audit.ts`.
-
-## Stopping services
-
-```bash
-docker compose down      # stop containers
-docker compose down -v   # also delete data volumes
+docker/           entrypoint (migrate, seed, start)
+prisma/           schema, migrations, seed
+src/              API, services, workers
+docker-compose.yml  app + postgres + redis
 ```
