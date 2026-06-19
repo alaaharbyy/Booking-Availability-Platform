@@ -14,6 +14,9 @@ import type {
 } from "../schemas/responses/booking.responses.js";
 import type { CreateBookingBody } from "../schemas/requests/booking.requests.js";
 import { generateBookingReference } from "../utils/utils.js";
+import { WebhookEventType } from "../constants/webhook-events.js";
+import { enqueueAvailabilityInvalidation } from "../lib/availability-cache.js";
+import { enqueueBookingWebhook } from "./booking-webhook.service.js";
 import { assertTransition, isCancellable } from "./booking-state.js";
 import { calculatePricingPreview } from "./pricing.service.js";
 
@@ -195,6 +198,13 @@ export async function createReservation(
     }),
   );
 
+  enqueueBookingWebhook(
+    tenantId,
+    WebhookEventType.BOOKING_RESERVED,
+    booking.id,
+  );
+  enqueueAvailabilityInvalidation(tenantId);
+
   return toBookingSummary(booking);
 }
 
@@ -269,6 +279,12 @@ export async function confirmReservation(
     },
   );
 
+  enqueueBookingWebhook(
+    tenantId,
+    WebhookEventType.BOOKING_CONFIRMED,
+    updated.id,
+  );
+
   return toBookingSummary(updated);
 }
 
@@ -335,6 +351,13 @@ export async function cancelReservation(
     },
   );
 
+  enqueueBookingWebhook(
+    tenantId,
+    WebhookEventType.BOOKING_CANCELLED,
+    updated.id,
+  );
+  enqueueAvailabilityInvalidation(tenantId);
+
   return toBookingSummary(updated);
 }
 
@@ -398,6 +421,13 @@ async function expireReservation(booking: {
         previousStatus: BookingStatus.RESERVED,
       },
     });
+
+    enqueueBookingWebhook(
+      booking.tenantId,
+      WebhookEventType.BOOKING_EXPIRED,
+      booking.id,
+    );
+    enqueueAvailabilityInvalidation(booking.tenantId);
 
     return true;
   });

@@ -57,4 +57,5 @@ export const env = {
   jwtRefreshExpiresInSeconds: parseDurationToSeconds(jwtRefreshExpiresIn),
   bookingReserveTtlSeconds: parseDurationToSeconds(bookingReserveTtl),
   bookingExpiryPollIntervalMs: optionalInt("BOOKING_EXPIRY_POLL_INTERVAL_MS", 60_000),
+  availabilityCacheTtlSeconds: optionalInt("AVAILABILITY_CACHE_TTL_SECONDS", 300),
 } as const;

@@ -9,7 +9,8 @@ Multi-tenant travel booking platform with availability management, pricing rules
 - Booking lifecycle: `RESERVED` → `CONFIRMED` | `CANCELLED` | `EXPIRED` with optimistic slot locking
 - Background expiry worker (BullMQ + Redis)
 - Admin: tenant booking list, audit log
-- Webhooks: one URL per tenant, HMAC-SHA256 signed delivery
+- Webhooks: one URL per tenant, HMAC-SHA256 signed delivery on booking lifecycle events
+- Availability cache: Redis-backed `GET /experiences` and `GET /experiences/:id`, broad tenant invalidation on slot changes
 - Tenant isolation on all resource access (`req.user.tenantId`)
 
 ## Prerequisites
@@ -97,6 +98,8 @@ curl -s -X POST http://localhost:3000/auth/login \
 
 Reservations hold for `BOOKING_RESERVE_TTL` (default 15m), then expire via background worker.
 
+Experience search/detail responses are cached in Redis (`AVAILABILITY_CACHE_TTL_SECONDS`, default 300s). Cache is cleared for the whole tenant when a booking reserves, cancels, or expires a slot.
+
 ```bash
 curl -s -X POST http://localhost:3000/bookings \
   -H "Authorization: Bearer TOKEN" -H "Content-Type: application/json" \
@@ -107,7 +110,9 @@ curl -s -X POST http://localhost:3000/bookings \
 
 One webhook per tenant. Outbound requests include HMAC-SHA256 headers: `X-Webhook-Id`, `X-Webhook-Timestamp`, `X-Webhook-Signature` (`t=<ts>,v1=<hex>` over `${timestamp}.${rawBody}`).
 
-**Testing:** Get a free URL at [Webhook.site](https://webhook.site/), register it, then call `/webhooks/test`.
+**Booking events** (sent automatically after reserve, confirm, cancel, or expiry): `booking.reserved`, `booking.confirmed`, `booking.cancelled`, `booking.expired`. Test events use `webhook.test`.
+
+**Testing:** Get a free URL at [Webhook.site](https://webhook.site/), register it, then create a booking or call `/webhooks/test`.
 
 ```bash
 curl -s -X POST http://localhost:3000/webhooks \

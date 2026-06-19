@@ -1,6 +1,12 @@
 import { Prisma } from "../generated/prisma/client.js";
 import type { Prisma as PrismaTypes } from "../generated/prisma/client.js";
 import { NotFoundError } from "../errors/index.js";
+import {
+  getCachedDetail,
+  getCachedSearch,
+  setCachedDetail,
+  setCachedSearch,
+} from "../lib/availability-cache.js";
 import { prisma } from "../lib/prisma.js";
 import type {
   ExperienceDetailResult,
@@ -66,6 +72,11 @@ export async function searchExperiences(
   tenantId: string,
   query: ExperienceSearchQuery,
 ): Promise<ExperienceSearchResult> {
+  const cached = await getCachedSearch<ExperienceSearchResult>(tenantId, query);
+  if (cached) {
+    return cached;
+  }
+
   const startAt = parseUtcDate(query.start_date);
   const endAt = endDateExclusive(query.end_date);
 
@@ -79,7 +90,7 @@ export async function searchExperiences(
 
   const experienceIds = matchingExperiences.map((experience) => experience.id);
   if (experienceIds.length === 0) {
-    return {
+    const emptyResult: ExperienceSearchResult = {
       items: [],
       pagination: {
         page: query.page,
@@ -88,6 +99,10 @@ export async function searchExperiences(
         totalPages: 0,
       },
     };
+    void setCachedSearch(tenantId, query, emptyResult).catch((err) => {
+      console.error("Failed to cache experience search result:", err);
+    });
+    return emptyResult;
   }
 
   const slotFilters = Prisma.join(
@@ -242,7 +257,7 @@ export async function searchExperiences(
     earliestSlotAt: row.earliest_slot_at.toISOString(),
   }));
 
-  return {
+  const result: ExperienceSearchResult = {
     items,
     pagination: {
       page: query.page,
@@ -251,6 +266,12 @@ export async function searchExperiences(
       totalPages,
     },
   };
+
+  void setCachedSearch(tenantId, query, result).catch((err) => {
+    console.error("Failed to cache experience search result:", err);
+  });
+
+  return result;
 }
 
 export async function getExperienceDetail(
@@ -258,6 +279,15 @@ export async function getExperienceDetail(
   experienceId: string,
   query: ExperienceDetailQuery,
 ): Promise<ExperienceDetailResult> {
+  const cached = await getCachedDetail<ExperienceDetailResult>(
+    tenantId,
+    experienceId,
+    query,
+  );
+  if (cached) {
+    return cached;
+  }
+
   const experience = await prisma.experience.findFirst({
     where: {
       id: experienceId,
@@ -342,7 +372,7 @@ export async function getExperienceDetail(
     slots[0]?.startsAt,
   );
 
-  return {
+  const result: ExperienceDetailResult = {
     id: experience.id,
     title: experience.title,
     destination: experience.destination,
@@ -358,4 +388,10 @@ export async function getExperienceDetail(
     pricingPreview,
     slots: slotPreviews,
   };
+
+  void setCachedDetail(tenantId, experienceId, query, result).catch((err) => {
+    console.error("Failed to cache experience detail result:", err);
+  });
+
+  return result;
 }

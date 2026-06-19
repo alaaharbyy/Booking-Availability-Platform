@@ -13,6 +13,7 @@ import type {
   WebhookTestResult,
 } from "../schemas/responses/webhook.responses.js";
 import { deliverWebhook } from "./webhook-delivery.service.js";
+import { WebhookEventType } from "../constants/webhook-events.js";
 
 function generateWebhookSecret(): string {
   return `whsec_${randomBytes(32).toString("hex")}`;
@@ -108,7 +109,7 @@ export async function sendTestWebhook(
   }
 
   const payload = {
-    event: "webhook.test",
+    event: WebhookEventType.TEST,
     occurred_at: new Date().toISOString(),
     tenant_id: tenantId,
     data:

@@ -5,6 +5,7 @@ import {
   closeBookingExpiryQueue,
   registerBookingExpiryScheduler,
 } from "./queues/booking-expiry.queue.js";
+import { closeRedisCacheClient } from "./lib/redis-cache.js";
 import {
   startBookingExpiryWorker,
   stopBookingExpiryWorker,
@@ -26,6 +27,7 @@ const server = app.listen(env.port, () => {
 async function shutdown(): Promise<void> {
   await stopBookingExpiryWorker();
   await closeBookingExpiryQueue();
+  await closeRedisCacheClient();
   server.close(() => {
     process.exit(0);
   });
