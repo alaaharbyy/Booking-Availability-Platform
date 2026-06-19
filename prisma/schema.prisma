@@ -320,6 +320,7 @@ model TenantWebhook {
 
   tenant      Tenant @relation(fields: [tenantId], references: [id])
 
+  @@unique([tenantId])
   @@index([tenantId])
 
   @@map("tenant_webhooks")
